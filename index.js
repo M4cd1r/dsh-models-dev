@@ -105,21 +105,27 @@ export function apply(ctx, config) {
   /**
    * One sweep: one catalog read, then every hooked-up pi-ai route (or only the
    * named ones). A route the catalog does not describe is reported and skipped.
+   * `log` collects this attempt's trace lines — the endpoint hands them to the
+   * client so an error notification can show what the host actually did.
    */
-  const runSync = async ({ force = false, routes } = {}) => {
+  const runSync = async ({ force = false, routes, log } = {}) => {
     const { sync, settings } = state;
     if (sync === undefined || settings === undefined) return [];
     const cfg = current();
-    trace(`refresh: loading catalog (force=${force}${routes === undefined ? '' : `, routes=${routes.join(',')}`})`);
+    const note = (line) => {
+      trace(line);
+      if (Array.isArray(log)) log.push(line);
+    };
+    note(`refresh: loading catalog (force=${force}${routes === undefined ? '' : `, routes=${routes.join(',')}`})`);
     const { data, stale } = await sync.load({ force });
-    trace(`refresh: catalog ${Object.keys(data ?? {}).length} providers (stale=${stale})`);
+    note(`refresh: catalog ${Object.keys(data ?? {}).length} providers (stale=${stale})`);
     if (stale) ctx.logger?.warn?.(`${NS}: models.dev unreachable — serving the cached catalog`);
     const wanted = routes === undefined ? undefined : new Set(routes);
     const providers = (ctx.llm.listConfigurableProviders?.() ?? []).filter(
       (row) => row?.settingsNs === TARGET_NS && (wanted === undefined || wanted.has(row.provider)),
     );
     const results = await syncRoutes({ settings, providers, catalog: data, sources: cfg.sources ?? {} });
-    trace(`refresh: ${JSON.stringify(results)}`);
+    note(`refresh: ${JSON.stringify(results)}`);
     return results;
   };
 
@@ -150,14 +156,23 @@ export function apply(ctx, config) {
   const handleRefresh = (req, res) => {
     if (!isLoopback(req)) return void writeJson(res, 403, { ok: false, error: 'forbidden: loopback-only' });
     if (req.method !== 'POST') return void writeJson(res, 405, { ok: false, error: 'method-not-allowed' });
+    const log = [];
     return readJsonBody(req)
       .then((body) => {
         const route = typeof body?.route === 'string' && body.route.length > 0 ? [body.route] : undefined;
-        return runSync({ force: true, routes: route });
+        return runSync({ force: true, routes: route, log });
       })
       .then(
-        (results) => writeJson(res, 200, { ok: true, results }),
-        (error) => writeJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) }),
+        (results) => writeJson(res, 200, { ok: true, results, log }),
+        // A failure answers with the message, its stack and the attempt log —
+        // exactly what the client's error notification renders.
+        (error) =>
+          writeJson(res, 400, {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? (error.stack ?? error.message) : String(error),
+            log,
+          }),
       );
   };
 

@@ -22,8 +22,10 @@ DeepSeek Harness 里已配置的提供方，其模型行的模态（图片输入
 - **自动检查**——启动时一次、此后每 `refreshHours` 一次，覆盖所有已接入提供方
   （`autoSync`）。
 - **刷新按钮**——位于 *设置 → 模型 →（提供方）编辑 → 模型能力* 的标题栏：
-  一个带刷新箭头的地球图标（"update models from models.dev API"）。点击立即
-  刷新该提供方的模型行。
+  一个地球图标（"update models from models.dev API"）。悬停时图标旋转 360°，
+  移开后平滑归位；点击后地球平滑过渡为加载图标，等待期间持续旋转。完成后弹出
+  通知卡片：成功卡片显示各路由的统计（`opencode-go: +2/~28`），失败卡片显示
+  错误信息、主机日志与堆栈跟踪。点击立即刷新该提供方的模型行。
 
 ```
 POST /api/dsh-models-dev/refresh   body: { "route": "opencode-go" }   # 或 {} 刷新全部

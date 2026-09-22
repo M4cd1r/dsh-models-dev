@@ -70,10 +70,10 @@ function fakeResponse() {
  * Build the host-shaped context: settings seam, llm directory, webserver seat.
  * The llm seam throws on any route registration — the refresh owns none.
  */
-function harness({ autoSync = true, sources = {}, views, lateWebServer = false } = {}) {
+function harness({ autoSync = true, sources = {}, views, lateWebServer = false, cache = true } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-models-dev-boot-'));
   const cachePath = join(home, 'models.dev.json');
-  writeFileSync(cachePath, JSON.stringify({ fetchedAt: new Date().toISOString(), data: CATALOG }));
+  if (cache) writeFileSync(cachePath, JSON.stringify({ fetchedAt: new Date().toISOString(), data: CATALOG }));
   process.env.DSH_HOME = home;
 
   // An unreachable catalog URL keeps the suite hermetic: forced sweeps fail
@@ -200,7 +200,12 @@ test('apply serves the refresh endpoint the icon drives', async () => {
   await route.handler(fakeRequest({ route: 'zai' }), res);
 
   assert.equal(res.captured.status, 200);
-  assert.deepEqual(res.captured.body, { ok: true, results: [{ route: 'zai', source: 'zai', added: 1, updated: 0 }] });
+  assert.equal(res.captured.body.ok, true);
+  assert.deepEqual(res.captured.body.results, [{ route: 'zai', source: 'zai', added: 1, updated: 0 }]);
+  assert.ok(
+    Array.isArray(res.captured.body.log) && res.captured.body.log.some((line) => line.includes('refresh:')),
+    `the attempt log rides along for the client's toasts: ${JSON.stringify(res.captured.body.log)}`,
+  );
   assert.deepEqual(h.writes.map((write) => write.ops[0].path[1]), ['zai'], 'the endpoint refreshes exactly the requested route');
 });
 
@@ -227,6 +232,30 @@ test('apply follows the sources override for custom route keys', async () => {
   const zai = h.writes.find((write) => write.ops[0].path[1] === 'zai');
   assert.ok(zai, 'the zai route is refreshed');
   assert.deepEqual(zai.ops[0].value.map((entry) => entry.id), ['a', 'b'], 'its models come from the opencode-go source');
+});
+
+test('a failed sweep answers the endpoint with the error, its stack and the log', async () => {
+  // No cache + an unreachable catalog: the forced sweep throws for real, and
+  // the error notification needs the stack and the attempt log to show them.
+  const h = harness({ autoSync: false, cache: false });
+  const { apply } = await loadPlugin();
+  apply(h.ctx, {});
+  await waitForBootstrap(h.home);
+
+  const route = h.routes.find((candidate) => candidate.path === REFRESH_PATH);
+  assert.ok(route, 'the refresh endpoint is registered');
+
+  const res = fakeResponse();
+  await route.handler(fakeRequest({ route: 'zai' }), res);
+
+  assert.equal(res.captured.status, 400);
+  assert.equal(res.captured.body.ok, false);
+  assert.match(res.captured.body.error, /could not fetch/, 'the failure message is reported');
+  assert.match(String(res.captured.body.stack), /Error|\bat\b/, 'the stack trace rides along');
+  assert.ok(
+    Array.isArray(res.captured.body.log) && res.captured.body.log.some((line) => line.includes('refresh: loading catalog')),
+    `the attempt log rides along: ${JSON.stringify(res.captured.body.log)}`,
+  );
 });
 
 test('apply seats the refresh endpoint even when the webserver appears late', async () => {

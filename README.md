@@ -25,8 +25,12 @@ alone. It registers **no routes of its own**: no duplicated providers.
 - **Automatic check** — one sweep at startup and every `refreshHours` for
   everything hooked up (`autoSync`).
 - **Refresh button** — in *Settings → Models → (provider) Edit → Model
-  capabilities* header: a globe-with-refresh icon ("update models from models.dev
-  API"). Pressing it refreshes that provider's rows immediately.
+  capabilities* header: a globe icon ("update models from models.dev API").
+  Hovering spins it 360° (and eases back on leave); pressing it crossfades the
+  globe into a loading spinner for the round trip. The answer pops a toast: a
+  success card with the per-route counts (`opencode-go: +2/~28`), or an error
+  card carrying the failure, the host log and the stack trace. Pressing it
+  refreshes that provider's rows immediately.
 
 ```
 POST /api/dsh-models-dev/refresh   body: { "route": "opencode-go" }   # or {} for all

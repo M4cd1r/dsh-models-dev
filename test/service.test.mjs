@@ -132,10 +132,14 @@ test('syncRoutes reports a refused write and keeps sweeping the rest', async () 
   const results = await syncRoutes({ settings, providers: PROVIDERS, catalog });
 
   assert.equal(writes.length, 2, 'the refused write does not stop the sweep');
-  assert.deepEqual(results, [
-    { route: 'opencode-go', source: 'opencode-go', added: 1, updated: 0 },
-    { route: 'zai', source: 'zai', error: 'settings namespace moved past the revision it was read at' },
-  ]);
+  assert.deepEqual(results[0], { route: 'opencode-go', source: 'opencode-go', added: 1, updated: 0 });
+  assert.equal(results[1].route, 'zai');
+  assert.equal(results[1].error, 'settings namespace moved past the revision it was read at');
+  assert.match(
+    String(results[1].stack),
+    /settings namespace moved past|\bat\b/,
+    'the refused write carries its stack for the error notification',
+  );
 });
 
 test('syncRoutes refreshes several routes of one namespace in one sweep', async () => {
