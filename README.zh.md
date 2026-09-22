@@ -45,17 +45,17 @@ dsh-models-dev:
           maxTokens: 131072         # 显式 maxTokens 同时成为请求的默认上限
 ```
 
-路由字段：`source`、`displayName`、`apiKeyEnv`、`baseURL`、`api`（为所有模型强制一种线协议）、`defaultContextWindow`、`defaultMaxTokens`、`models`（id + 可选的 `name`/`contextWindow`/`maxTokens`/`input`/`reasoning` 覆盖；一旦提供，只服务列出的 id）。
+路由字段：`source`、`displayName`、`apiKeyEnv`、`baseURL`、`api`（为所有模型强制一种线协议）、`defaultContextWindow`、`defaultMaxTokens`、`models`（id + 可选的 `name`/`contextWindow`/`maxTokens`/`input`/`reasoning`/`thinkingLevelMap` 覆盖；一旦提供，只服务列出的 id）。模型的 `thinkingLevelMap` 覆盖会替换 models.dev 为其声明的级别，`false` 则清除它们，让目录过度声明的网关回落到 pi-ai 自带的提供商默认值。
 
 ## 工作原理
 
 1. **获取** —— 启动时及每隔 `refreshHours` 获取 `models.dev/api.json`，缓存在 `$DSH_HOME/plugins/dsh-models-dev/models.dev.json`；网络故障时继续服务最后缓存的目录（并记为 stale）。
-2. **映射** —— 纯映射（`lib/map.mjs`），遵循 pi-ai `generate-models.ts` 的规则：`provider.npm`（可按模型覆盖）决定线协议（`@ai-sdk/anthropic` → `anthropic-messages`、`@ai-sdk/openai` → `openai-responses`，其余 → `openai-completions`）；`provider.api` 是基址（Anthropic 路由调整为 SDK 追加 `/v1/messages` 的形状）；价格/限制/模态 1:1 映射；交错的 `reasoning_content` 标记 replay 兼容性。pi-ai 能从提供商 id + baseURL 推断的兼容开关一律留空，由它自行检测。
+2. **映射** —— 纯映射（`lib/map.mjs`），遵循 pi-ai `generate-models.ts` 的规则：`provider.npm`（可按模型覆盖）决定线协议（`@ai-sdk/anthropic` → `anthropic-messages`、`@ai-sdk/openai` → `openai-responses`，其余 → `openai-completions`）；`provider.api` 是基址（Anthropic 路由调整为 SDK 追加 `/v1/messages` 的形状）；价格/限制/模态 1:1 映射；模型的 `reasoning_options` effort 值成为其 `thinkingLevelMap`，因此可选思维级别来自 models.dev（`none` 是 `off` 的线格式写法，未声明的级别被明确标记为不支持）；交错的 `reasoning_content` 标记 replay 兼容性。pi-ai 能从提供商 id + baseURL 推断的兼容开关一律留空，由它自行检测。
 3. **注册** —— 单个 `PiAiAdapter`（复用自 `@deepseek-ai/dsh-llm-pi-ai`）通过 `ctx.llm.registerAdapter` 服务所有路由，并注册 `registerConfigurableProviders`（设置界面）与 `registerModelDiscovery`（基于 models.dev 的「获取模型」）。宿主类从正在运行的 dsh 自身的模块实例解析，保证 seam 看到一致的类标识。
 
-## 限制（0.1.0）
+## 限制
 
-- 尚未映射 `thinkingLevelMap` / `reasoning_options` 推理级别（仅 `reasoning: true|false`）。
+- 只映射 `reasoning_options` 的 `effort` 条目。`budget_tokens`（`min`/`max`）与 `toggle` 条目被忽略：pi-ai 的思维级别取线格式值或 `null`，没有与预算区间对应的表示。未声明 effort 值的模型（例如 `mimo-v2.6-pro`）保持 `reasoning: true` 且不带 `thinkingLevelMap`，由 pi-ai 自带的提供商默认值决定 —— 可用按模型的 `thinkingLevelMap` 覆盖。
 - `google-generative-ai` 模型会被报告为不可用（列出但无法派发）。
 - 缺少 `tool_call: true` 的模型以及 `status: deprecated` 的模型会被跳过（编码代理用不了它们）。
 

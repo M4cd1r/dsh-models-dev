@@ -1,7 +1,7 @@
 // test/map.test.mjs — pure mapping tests against a models.dev-shaped fixture.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mapModels } from '../lib/map.mjs';
+import { getEffortThinkingLevelMap, mapModels } from '../lib/map.mjs';
 
 const FIXTURE = {
   'opencode-go': {
@@ -30,6 +30,19 @@ const FIXTURE = {
         modalities: { input: ['text', 'image'], output: ['text'] },
         limit: { context: 1000000, output: 131072 },
         cost: { input: 0.3, output: 1.2, cache_read: 0.06 },
+      },
+      'glm-5.3': {
+        id: 'glm-5.3',
+        name: 'GLM-5.3',
+        tool_call: true,
+        reasoning: true,
+        reasoning_options: [
+          { type: 'toggle' },
+          { type: 'effort', values: ['low', 'high', 'max'] },
+        ],
+        modalities: { input: ['text'], output: ['text'] },
+        limit: { context: 200000, output: 65536 },
+        cost: { input: 0.6, output: 1.9, cache_read: 0.119 },
       },
       'text-only-model': { id: 'text-only-model', tool_call: false },
       'old-model': { id: 'old-model', tool_call: true, status: 'deprecated' },
@@ -100,3 +113,86 @@ test('unknown provider produces a route-level error', () => {
   assert.equal(models.length, 0);
   assert.match(errors.get('nope') ?? '', /has no provider/);
 });
+
+// ─── thinking levels (models.dev reasoning_options → pi-ai thinkingLevelMap) ───
+
+test('effort values become a full level map with unsupported levels pinned to null', () => {
+  assert.deepEqual(getEffortThinkingLevelMap([{ type: 'effort', values: ['low', 'medium', 'high'] }]), {
+    off: null,
+    minimal: null,
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    xhigh: null,
+    max: null,
+  });
+});
+
+test('a "none" effort becomes the off level; every other value maps 1:1', () => {
+  assert.deepEqual(getEffortThinkingLevelMap([{ type: 'effort', values: ['none', 'high', 'max'] }]), {
+    off: 'none',
+    minimal: null,
+    low: null,
+    medium: null,
+    high: 'high',
+    xhigh: null,
+    max: 'max',
+  });
+});
+
+test('values without a pi level ("default", null) are ignored, not turned into levels', () => {
+  assert.deepEqual(getEffortThinkingLevelMap([{ type: 'effort', values: ['default', null, 'xhigh'] }]), {
+    off: null,
+    minimal: null,
+    low: null,
+    medium: null,
+    high: null,
+    xhigh: 'xhigh',
+    max: null,
+  });
+  assert.equal(getEffortThinkingLevelMap([{ type: 'effort', values: ['default', null] }]), undefined);
+});
+
+test('budget_tokens- and toggle-only models publish no level map', () => {
+  assert.equal(getEffortThinkingLevelMap([{ type: 'budget_tokens', min: 1024, max: 32768 }]), undefined);
+  assert.equal(getEffortThinkingLevelMap([{ type: 'toggle' }]), undefined);
+  assert.equal(getEffortThinkingLevelMap([]), undefined);
+  assert.equal(getEffortThinkingLevelMap(undefined), undefined);
+});
+
+test('a mixed option list reads only its effort entry', () => {
+  assert.deepEqual(
+    getEffortThinkingLevelMap([{ type: 'toggle' }, { type: 'budget_tokens', min: 1024 }, { type: 'effort', values: ['minimal', 'high'] }]),
+    { off: null, minimal: 'minimal', low: null, medium: null, high: 'high', xhigh: null, max: null },
+  );
+});
+
+test('mapped models carry the level map; models without effort options carry no field at all', () => {
+  const { models } = mapModels('opencode-go', 'opencode-go', FIXTURE['opencode-go']);
+  const glm = models.find((m) => m.id === 'glm-5.3');
+  assert.ok(glm, 'glm-5.3 is mapped');
+  assert.deepEqual(glm.thinkingLevelMap, {
+    off: null,
+    minimal: null,
+    low: 'low',
+    medium: null,
+    high: 'high',
+    xhigh: null,
+    max: 'max',
+  });
+  const mimo = models.find((m) => m.id === 'mimo-v2.6-pro');
+  assert.equal('thinkingLevelMap' in mimo, false);
+});
+
+test('a configured thinkingLevelMap replaces the mapped one, and false strips it', () => {
+  const replaced = mapModels('opencode-go', 'opencode-go', FIXTURE['opencode-go'], {
+    models: [{ id: 'glm-5.3', thinkingLevelMap: { off: null, low: 'low', medium: 'medium', high: 'high' } }],
+  });
+  assert.deepEqual(replaced.models[0].thinkingLevelMap, { off: null, low: 'low', medium: 'medium', high: 'high' });
+
+  const stripped = mapModels('opencode-go', 'opencode-go', FIXTURE['opencode-go'], {
+    models: [{ id: 'glm-5.3', thinkingLevelMap: false }],
+  });
+  assert.equal('thinkingLevelMap' in stripped.models[0], false);
+});
+

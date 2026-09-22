@@ -34,29 +34,29 @@ const MIN_REFRESH_HOURS = 0.05;
 
 const modelProfile = z.object({
   id: z.string(),
-  name: z.string().optional(),
-  contextWindow: z.number().optional(),
-  maxTokens: z.number().optional(),
-  input: z.array(z.string()).optional(),
-  reasoning: z.boolean().optional(),
+  name: z.string().required(false),
+  contextWindow: z.number().required(false),
+  maxTokens: z.number().required(false),
+  input: z.array(z.string()).required(false),
+  reasoning: z.boolean().required(false),
 });
 
 const providerProfile = z.object({
-  source: z.string().optional(),
-  displayName: z.string().optional(),
-  apiKeyEnv: z.string().optional(),
-  baseURL: z.string().optional(),
-  api: z.string().optional(),
-  defaultContextWindow: z.number().optional(),
-  defaultMaxTokens: z.number().optional(),
-  models: z.array(modelProfile).optional(),
+  source: z.string().required(false),
+  displayName: z.string().required(false),
+  apiKeyEnv: z.string().required(false),
+  baseURL: z.string().required(false),
+  api: z.string().required(false),
+  defaultContextWindow: z.number().required(false),
+  defaultMaxTokens: z.number().required(false),
+  models: z.array(modelProfile).required(false),
 });
 
 /** Plugin configuration: the models.dev-backed provider routes this instance owns. */
 export const Config = z.object({
   modelsDevUrl: z.string().default(DEFAULT_URL),
   refreshHours: z.number().min(MIN_REFRESH_HOURS).default(24),
-  cachePath: z.string().optional(),
+  cachePath: z.string().required(false),
   providers: z.dict(providerProfile).default({}),
 });
 

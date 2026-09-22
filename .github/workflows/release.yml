@@ -1,12 +1,8 @@
-# Publish dsh-models-dev to npm via Trusted Publishing (OIDC) — no tokens.
+# Publish dsh-models-dev to npm via Trusted Publishing (OIDC) — no NPM_TOKEN.
 #
-# npmjs.com trusts this exact repo + workflow file (the package's Trusted
-# Publisher: owner M4cd1r, repo dsh-models-dev, workflow release.yml).
+# npmjs.com trusts this exact repo + workflow file (configured as the package's
+# Trusted Publisher: owner M4cd1r, repo dsh-models-dev, workflow release.yml).
 # The npm CLI exchanges the GitHub OIDC token automatically (npm >= 11.5.1).
-#
-# History: 0.1.0 was bootstrapped manually because npm can only configure a
-# Trusted Publisher for an existing package (npm/cli#8544). From 0.1.1 on,
-# releases are pure OIDC + provenance.
 name: release
 
 on:
