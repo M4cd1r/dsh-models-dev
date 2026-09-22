@@ -8,7 +8,7 @@
 // hand-added models models.dev does not know kept untouched.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { entryFromModel, effortsFromModel, mergeModels } from '../lib/caps.mjs';
+import { entryFromModel, effortsFromModel, mergeModels, wireProfile } from '../lib/caps.mjs';
 
 /** A models.dev model record, as found under providers[id].models[modelId]. */
 const model = (overrides = {}) => ({
@@ -112,4 +112,20 @@ test('mergeModels keeps capabilities the catalog stays silent about', () => {
   assert.equal(updated, 1);
   assert.deepEqual(entries[0].reasoningEfforts, { low: 'low' });
   assert.deepEqual(entries[0].input, ['text', 'image']);
+});
+
+test('wireProfile maps the models.dev package to protocol and endpoint', () => {
+  assert.deepEqual(wireProfile({ npm: '@ai-sdk/anthropic', api: 'https://api.anthropic.com/v1' }), {
+    api: 'anthropic-messages',
+    baseURL: 'https://api.anthropic.com',
+  });
+  assert.deepEqual(wireProfile({ npm: '@ai-sdk/openai', api: 'https://api.openai.com/v1' }), {
+    api: 'openai-responses',
+    baseURL: 'https://api.openai.com/v1',
+  });
+  assert.deepEqual(wireProfile({ npm: '@ai-sdk/openai-compatible', api: 'https://opencode.ai/zen/go/v1' }), {
+    api: 'openai-completions',
+    baseURL: 'https://opencode.ai/zen/go/v1',
+  });
+  assert.deepEqual(wireProfile({}), { api: 'openai-completions', baseURL: undefined });
 });

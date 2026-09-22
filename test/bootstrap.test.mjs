@@ -70,7 +70,7 @@ function fakeResponse() {
  * Build the host-shaped context: settings seam, llm directory, webserver seat.
  * The llm seam throws on any route registration — the refresh owns none.
  */
-function harness({ autoSync = true, sources = {}, views } = {}) {
+function harness({ autoSync = true, sources = {}, views, lateWebServer = false } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-models-dev-boot-'));
   const cachePath = join(home, 'models.dev.json');
   writeFileSync(cachePath, JSON.stringify({ fetchedAt: new Date().toISOString(), data: CATALOG }));
@@ -83,7 +83,7 @@ function harness({ autoSync = true, sources = {}, views } = {}) {
   const writes = [];
   const routes = [];
   const errors = [];
-  const namespaceViews = views ?? [{ ns: 'llm-pi-ai', value: {}, user: {}, revision: 5 }];
+  const namespaceViews = views ?? [{ ns: 'llm-pi-ai', value: { providers: { 'opencode-go': {}, zai: {} } }, user: {}, revision: 5 }];
 
   const settings = {
     installSection(_owner, ns, _schema, _entry, hooks) {
@@ -122,10 +122,24 @@ function harness({ autoSync = true, sources = {}, views } = {}) {
     logger: { info: () => {}, debug: () => {}, warn: () => {}, error: (...args) => errors.push(args) },
     llm,
     webServer,
-    get: (name) => (name === 'settings' ? settings : name === 'webServer' ? webServer : undefined),
+    // Cordis semantics: `ctx.get(name)` is strict — reading a service the fiber
+    // did not declare in `inject` throws "cannot get property ... without
+    // inject"; only `ctx.get(name, false)` is lenient. The harness enforces that
+    // so a plain property read can never sneak back in.
+    injected: new Set(['llm']),
+    get(name, strict = true) {
+      if (strict && !this.injected.has(name)) throw new Error(`cannot get property "${name}" without inject`);
+      if (name === 'settings') return settings;
+      if (name === 'webServer') return lateWebServer ? undefined : webServer;
+      return undefined;
+    },
     on: () => {},
     effect: () => {},
-    inject: (_deps, callback) => callback({ settings }),
+    inject: (deps, callback) => {
+      const provided = {};
+      for (const dep of deps) provided[dep] = dep === 'settings' ? settings : webServer;
+      callback(provided);
+    },
   };
 
   return { ctx, home, sections, writes, routes, errors };
@@ -204,7 +218,7 @@ test('apply skips the automatic sweep when autoSync is off', async () => {
 test('apply follows the sources override for custom route keys', async () => {
   const h = harness({
     sources: { zai: 'opencode-go' },
-    views: [{ ns: 'llm-pi-ai', value: {}, user: {}, revision: 2 }],
+    views: [{ ns: 'llm-pi-ai', value: { providers: { 'opencode-go': {}, zai: {} } }, user: {}, revision: 2 }],
   });
   const { apply } = await loadPlugin();
   apply(h.ctx, {});
@@ -213,4 +227,14 @@ test('apply follows the sources override for custom route keys', async () => {
   const zai = h.writes.find((write) => write.ops[0].path[1] === 'zai');
   assert.ok(zai, 'the zai route is refreshed');
   assert.deepEqual(zai.ops[0].value.map((entry) => entry.id), ['a', 'b'], 'its models come from the opencode-go source');
+});
+
+test('apply seats the refresh endpoint even when the webserver appears late', async () => {
+  const h = harness({ lateWebServer: true });
+  const { apply } = await loadPlugin();
+  apply(h.ctx, {});
+  await waitForBootstrap(h.home);
+
+  const route = h.routes.find((candidate) => candidate.path === REFRESH_PATH);
+  assert.ok(route, `registered routes: ${h.routes.map((candidate) => candidate.path).join(', ') || 'none'} (the seat arrives through inject)`);
 });

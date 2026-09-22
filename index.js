@@ -115,7 +115,7 @@ export function apply(ctx, config) {
     trace(`refresh: catalog ${Object.keys(data ?? {}).length} providers (stale=${stale})`);
     if (stale) ctx.logger?.warn?.(`${NS}: models.dev unreachable — serving the cached catalog`);
     const wanted = routes === undefined ? undefined : new Set(routes);
-    const providers = (ctx.llm?.listConfigurableProviders?.() ?? []).filter(
+    const providers = (ctx.llm.listConfigurableProviders?.() ?? []).filter(
       (row) => row?.settingsNs === TARGET_NS && (wanted === undefined || wanted.has(row.provider)),
     );
     const results = await syncRoutes({ settings, providers, catalog: data, sources: cfg.sources ?? {} });
@@ -164,7 +164,10 @@ export function apply(ctx, config) {
   void (async () => {
     try {
       trace('bootstrap: start');
-      const settings = ctx.get?.('settings') ?? ctx.settings;
+      // Service access is strict in cordis: a plain property read of a service the
+      // fiber did not declare in `inject` throws "cannot get property ... without
+      // inject", so the optional seats are read with the lenient get(name, false).
+      const settings = ctx.get('settings', false);
       if (settings !== undefined) installSettings(settings);
       else trace('bootstrap: settings service not up yet — installing when it appears');
 
@@ -178,12 +181,19 @@ export function apply(ctx, config) {
       state.sync = sync;
       trace('bootstrap: catalog sync ready');
 
-      const webServer = ctx.get?.('webServer', false) ?? ctx.webServer;
-      if (webServer !== undefined && typeof webServer.register === 'function') {
-        webServer.register({ kind: 'exact', path: REFRESH_PATH, handler: handleRefresh });
+      // The refresh endpoint: what the "update models from models.dev API" button
+      // drives. The webserver seat can appear after this plugin (like settings),
+      // so it is claimed through inject when it is not up yet.
+      const webServer = ctx.get('webServer', false);
+      const seatEndpoint = (seat) => {
+        if (seat === undefined || typeof seat.register !== 'function') return;
+        seat.register({ kind: 'exact', path: REFRESH_PATH, handler: handleRefresh });
         trace(`bootstrap: refresh endpoint on ${REFRESH_PATH}`);
-      } else {
-        trace('bootstrap: webserver seat not available — endpoint not registered');
+      };
+      if (webServer !== undefined) seatEndpoint(webServer);
+      else {
+        trace('bootstrap: webserver seat not up yet — claiming it when it appears');
+        ctx.inject(['webServer'], (webCtx) => seatEndpoint(webCtx.webServer));
       }
 
       // The automatic check for everything hooked up: once here (the catalog
