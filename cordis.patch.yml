@@ -1,0 +1,5 @@
+# dsh-models-dev bundle patch: mount the live models.dev catalog plugin under
+# its package name, resolved through the profile's node_modules.
+- insert:
+    - id: dsh-models-dev
+      name: dsh-models-dev
