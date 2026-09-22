@@ -3,6 +3,10 @@
 # npmjs.com trusts this exact repo + workflow file (configured as the package's
 # Trusted Publisher: owner M4cd1r, repo dsh-models-dev, workflow release.yml).
 # The npm CLI exchanges the GitHub OIDC token automatically (npm >= 11.5.1).
+#
+# A tag run also cuts the matching GitHub release (auto-generated notes) once —
+# and only once — the npm publish succeeded, so a failed publish never leaves a
+# release pointing at an unpublished version.
 name: release
 
 on:
@@ -11,7 +15,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -38,3 +42,11 @@ jobs:
 
       - name: Publish to npm
         run: npm publish --access public --provenance
+
+      # Tag runs finish with the matching GitHub release; a manual dispatch
+      # publishes from a branch ref and has no version to announce.
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "dsh-models-dev $GITHUB_REF_NAME"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

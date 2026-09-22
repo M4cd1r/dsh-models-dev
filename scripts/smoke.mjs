@@ -1,40 +1,28 @@
-// scripts/smoke.mjs — end-to-end sanity: fixture mapping plus a best-effort live
-// check against https://models.dev/api.json (network optional).
+// scripts/smoke.mjs — fixture mapping plus a best-effort live check.
+//
+// The fixture pins the mapping contract (modalities → `input`, effort values →
+// `reasoningEfforts`); the live check re-derives the expectations straight from
+// https://models.dev/api.json so the two can never drift apart quietly.
 import assert from 'node:assert/strict';
-import { getEffortThinkingLevelMap, mapModels } from '../lib/map.mjs';
+import { entryFromModel, mergeModels } from '../lib/caps.mjs';
 
 const fixture = {
-  id: 'opencode-go',
-  npm: '@ai-sdk/openai-compatible',
-  api: 'https://opencode.ai/zen/go/v1',
-  models: {
-    'mimo-v2.6-pro': {
-      id: 'mimo-v2.6-pro',
-      name: 'MiMo-V2.6-Pro',
-      tool_call: true,
-      reasoning: true,
-      interleaved: { field: 'reasoning_content' },
-      modalities: { input: ['text', 'image'], output: ['text'] },
-      limit: { context: 1048576, output: 131072 },
-      cost: { input: 0.435, output: 0.87, cache_read: 0.003625 },
-    },
-  },
+  id: 'mimo-v2.6-pro',
+  name: 'MiMo-V2.6-Pro',
+  tool_call: true,
+  reasoning: true,
+  reasoning_options: [{ type: 'effort', values: ['none', 'low', 'high'] }],
+  modalities: { input: ['text', 'image'], output: ['text'] },
+  limit: { context: 1048576, output: 131072 },
 };
 
-const local = mapModels('opencode-go', 'opencode-go', fixture).models[0];
-assert.equal(local.api, 'openai-completions');
-assert.equal(local.baseUrl, 'https://opencode.ai/zen/go/v1');
-assert.equal('thinkingLevelMap' in local, false, 'a model with no effort options publishes no level map');
-assert.deepEqual(getEffortThinkingLevelMap([{ type: 'effort', values: ['none', 'high'] }]), {
-  off: 'none',
-  minimal: null,
-  low: null,
-  medium: null,
-  high: 'high',
-  xhigh: null,
-  max: null,
-});
-console.log(`smoke: fixture maps mimo-v2.6-pro -> ${local.api} @ ${local.baseUrl} (no effort metadata, no level map)`);
+const local = entryFromModel(fixture);
+assert.deepEqual(local.input, ['text', 'image']);
+assert.deepEqual(local.reasoningEfforts, { off: 'none', low: 'low', high: 'high' });
+const merged = mergeModels([{ id: 'mimo-v2.6-pro', name: 'Hand' }], [local]);
+assert.equal(merged.updated, 1);
+assert.equal(merged.entries[0].name, 'Hand', 'hand-set fields survive a refresh');
+console.log('smoke: fixture maps mimo-v2.6-pro -> input text+image, thinking none/low/high (hand name kept)');
 
 let data;
 try {
@@ -45,37 +33,36 @@ try {
 }
 
 if (data !== undefined) {
-  const source = data['opencode-go'];
-  const { models } = mapModels('opencode-go', 'opencode-go', source);
-  const pro = models.find((model) => model.id === 'mimo-v2.6-pro');
-  assert.ok(pro, 'live models.dev lists mimo-v2.6-pro on opencode-go');
-  assert.equal(pro.api, 'openai-completions');
+  const raw = data['opencode-go']?.models ?? {};
+  const entries = Object.values(raw).map(entryFromModel).filter((entry) => entry !== null);
+  const pro = entries.find((entry) => entry.id === 'mimo-v2.6-pro');
+  assert.ok(pro, 'live models.dev lists mimo-v2.6-pro for opencode-go');
+  assert.deepEqual(pro.input, ['text', 'image'], 'mimo-v2.6-pro accepts images');
 
-  // Every level models.dev declares effort for must arrive selectable and
-  // identity-mapped, and every level it omits must be pinned unsupported. The
-  // expectation is re-derived here from the raw catalog, not reused from map.mjs.
+  // Every capability is re-derived from the raw catalog, not reused from caps.mjs.
   const LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-  const withLevels = models.filter((model) => model.thinkingLevelMap !== undefined);
-  assert.ok(withLevels.length > 0, 'live models.dev declares effort levels for opencode-go models');
-  for (const model of withLevels) {
-    const declared = new Set(
-      (source.models[model.id].reasoning_options ?? []).flatMap((option) => (option.type === 'effort' ? option.values : [])),
-    );
-    assert.deepEqual(
-      Object.keys(model.thinkingLevelMap).sort(),
-      ['off', ...LEVELS].sort(),
-      `${model.id} publishes every level key`,
-    );
-    assert.equal(model.thinkingLevelMap.off, declared.has('none') ? 'none' : null, `${model.id} off`);
-    for (const level of LEVELS) {
-      assert.equal(model.thinkingLevelMap[level], declared.has(level) ? level : null, `${model.id} ${level}`);
+  let withEfforts = 0;
+  for (const entry of entries) {
+    const source = raw[entry.id];
+    const expectsImage = (source.modalities?.input ?? []).includes('image');
+    assert.deepEqual(entry.input, expectsImage ? ['text', 'image'] : ['text'], `${entry.id} modalities`);
+    const values = (source.reasoning_options ?? [])
+      .filter((option) => option.type === 'effort')
+      .flatMap((option) => option.values ?? []);
+    const levels = values.filter((value) => value === 'none' || LEVELS.includes(value));
+    if (levels.length === 0 || levels.every((value) => value === 'none')) {
+      assert.ok(entry.reasoningEfforts === undefined || entry.reasoningEfforts === false, `${entry.id} declares no thinking levels`);
+    } else {
+      withEfforts += 1;
+      assert.deepEqual(
+        Object.keys(entry.reasoningEfforts).sort(),
+        levels.map((value) => (value === 'none' ? 'off' : value)).sort(),
+        `${entry.id} thinking levels`,
+      );
     }
   }
-  assert.equal('thinkingLevelMap' in pro, false, 'mimo-v2.6-pro declares no effort levels');
-
-  console.log(
-    `smoke: live models.dev maps ${models.length} opencode-go models, ${withLevels.length} with verified thinking levels`,
-  );
+  assert.ok(withEfforts > 0, 'live models.dev declares thinking levels for some opencode-go models');
+  console.log(`smoke: live models.dev serves ${entries.length} opencode-go models, ${withEfforts} with thinking levels`);
 }
 
 console.log('smoke: OK');

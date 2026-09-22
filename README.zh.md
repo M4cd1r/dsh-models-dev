@@ -1,70 +1,62 @@
 # dsh-models-dev
 
-**为 DeepSeek Harness LLM 提供商提供实时 [models.dev](https://models.dev) 目录。**
+用**活的** [models.dev](https://models.dev) 目录维护 DSH 提供方的模型目录。
 
-`dsh-llm-pi-ai` 使用 pi-ai **内置**的目录解析提供商和模型 —— 那是 models.dev 在构建时的快照，会在版本之间过时。当 OpenCode Go 添加 `mimo-v2.6-pro`（2026-09-22）时，所有已安装的 pi-ai 目录都没有它，dsh 拒绝了该路由：*„provider "opencode-go" model "mimo-v2.6-pro" needs an api; the installed catalog does not describe it"*。
+DeepSeek Harness 里已配置的提供方，其模型行的模态（图片输入）与思考档位会随版本
+发布逐渐过时，新模型也不会出现。本插件刷新你**已在使用**的提供方的 `models`
+数组——补入新模型、就地更新已有模型的能力，用户手加的模型行保持不动。它
+**不注册任何路由**：不产生重复的提供方。
 
-本插件为其所拥有的路由替换该快照机制：在启动时及每隔 `refreshHours` 获取 `https://models.dev/api.json`，把已配置提供商的模型映射为 pi-ai 模型条目（协议、端点、价格、限制、模态），并通过 `llm-pi-ai` 使用的同一个 `ctx.llm` seam 注册路由。models.dev 上的新模型无需等待 pi-ai 发版即可出现。
+## 工作方式
 
-## 安装
+1. 抓取 `https://models.dev/api.json`（24 小时 TTL 缓存于
+   `$DSH_HOME/plugins/dsh-models-dev/models.dev.json`，断网时回退到缓存）。
+2. 对每个已接入的路由（可配置提供方目录中的 llm-pi-ai 系列行）把 models.dev
+   记录映射为 `models` 条目：`modalities.input` → `input`（图片输入开关），
+   `reasoning_options` 档位值 → `reasoningEfforts`（思考档位及其发送值）。
+3. 用设置接口的路径写入与修订号围栏把合并后的数组写回
+   `providers.<route>.models`——与「模型能力」编辑器的写入完全一致。
+
+## 入口
+
+- **自动检查**——启动时一次、此后每 `refreshHours` 一次，覆盖所有已接入提供方
+  （`autoSync`）。
+- **刷新按钮**——位于 *设置 → 模型 →（提供方）编辑 → 模型能力* 的标题栏：
+  一个带刷新箭头的地球图标（"update models from models.dev API"）。点击立即
+  刷新该提供方的模型行。
 
 ```
-dsh plugin --profile web add dsh-models-dev
+POST /api/dsh-models-dev/refresh   body: { "route": "opencode-go" }   # 或 {} 刷新全部
 ```
 
-之后重启 dsh（插件通过 profile bundle patch 挂载）。
+该端点与其他内置 `/api` 路由一样仅限 loopback（受信任的 LAN 请求由 dsh-lan
+重放为 loopback）。
 
-## 配置
-
-`~/.dsh/settings.yaml` 中的 `dsh-models-dev` 段：
+## 设置
 
 ```yaml
+# ~/.dsh/settings.yaml
 dsh-models-dev:
-  refreshHours: 24          # 目录刷新间隔（可选）
-  providers:
-    opencode-go:            # dsh 路由键 —— 该键决定共存还是替换
-      source: opencode-go   # models.dev 提供商 id（默认等于路由键）
-      apiKeyEnv: OPENCODE_GO_API_KEY
+  refreshHours: 24        # 自动刷新周期（小时）
+  autoSync: true          # 启动时与定时的自动检查
+  modelsDevUrl: https://models.dev/api.json   # 可选
+  cachePath: ...          # 可选：目录缓存位置
+  sources:                # 可选：路由 -> models.dev 提供方 id 映射
+    my-gateway: opencode-go
 ```
 
-这样就够了：models.dev 为 `opencode-go` 列出的每个可用模型（`tool_call` 且非 deprecated）都会成为可选的 dsh 模型。
+作用范围：**llm-pi-ai 系列**（`settingsNs: llm-pi-ai`）——本插件写入的模型形状
+（`input`、`reasoningEfforts`）即该系列的 schema。其他适配器（如 DeepSeek）声明的
+形状不同，保持不动。
 
-**替换模式** —— 复用 llm-pi-ai 正在服务的键（`opencode-go`），但要先从 `llm-pi-ai.providers` *删除*该路由；一个路由键只能被一个 adapter 注册。
-
-**共存模式** —— 选一个 llm-pi-ai 未使用的键：
-
-```yaml
-dsh-models-dev:
-  providers:
-    opencode-go-live:
-      source: opencode-go
-      apiKeyEnv: OPENCODE_GO_API_KEY
-      models:                       # 可选：只服务子集 / 覆盖字段
-        - id: mimo-v2.6-pro
-          name: MiMo V2.6 Pro
-          maxTokens: 131072         # 显式 maxTokens 同时成为请求的默认上限
-```
-
-路由字段：`source`、`displayName`、`apiKeyEnv`、`baseURL`、`api`（为所有模型强制一种线协议）、`defaultContextWindow`、`defaultMaxTokens`、`models`（id + 可选的 `name`/`contextWindow`/`maxTokens`/`input`/`reasoning`/`thinkingLevelMap` 覆盖；一旦提供，只服务列出的 id）。模型的 `thinkingLevelMap` 覆盖会替换 models.dev 为其声明的级别，`false` 则清除它们，让目录过度声明的网关回落到 pi-ai 自带的提供商默认值。
-
-## 工作原理
-
-1. **获取** —— 启动时及每隔 `refreshHours` 获取 `models.dev/api.json`，缓存在 `$DSH_HOME/plugins/dsh-models-dev/models.dev.json`；网络故障时继续服务最后缓存的目录（并记为 stale）。
-2. **映射** —— 纯映射（`lib/map.mjs`），遵循 pi-ai `generate-models.ts` 的规则：`provider.npm`（可按模型覆盖）决定线协议（`@ai-sdk/anthropic` → `anthropic-messages`、`@ai-sdk/openai` → `openai-responses`，其余 → `openai-completions`）；`provider.api` 是基址（Anthropic 路由调整为 SDK 追加 `/v1/messages` 的形状）；价格/限制/模态 1:1 映射；模型的 `reasoning_options` effort 值成为其 `thinkingLevelMap`，因此可选思维级别来自 models.dev（`none` 是 `off` 的线格式写法，未声明的级别被明确标记为不支持）；交错的 `reasoning_content` 标记 replay 兼容性。pi-ai 能从提供商 id + baseURL 推断的兼容开关一律留空，由它自行检测。
-3. **注册** —— 单个 `PiAiAdapter`（复用自 `@deepseek-ai/dsh-llm-pi-ai`）通过 `ctx.llm.registerAdapter` 服务所有路由，并注册 `registerConfigurableProviders`（设置界面）与 `registerModelDiscovery`（基于 models.dev 的「获取模型」）。宿主类从正在运行的 dsh 自身的模块实例解析，保证 seam 看到一致的类标识。
-
-## 限制
-
-- 只映射 `reasoning_options` 的 `effort` 条目。`budget_tokens`（`min`/`max`）与 `toggle` 条目被忽略：pi-ai 的思维级别取线格式值或 `null`，没有与预算区间对应的表示。未声明 effort 值的模型（例如 `mimo-v2.6-pro`）保持 `reasoning: true` 且不带 `thinkingLevelMap`，由 pi-ai 自带的提供商默认值决定 —— 可用按模型的 `thinkingLevelMap` 覆盖。
-- `google-generative-ai` 模型会被报告为不可用（列出但无法派发）。
-- 缺少 `tool_call: true` 的模型以及 `status: deprecated` 的模型会被跳过（编码代理用不了它们）。
+启动链路的追踪记录保存在 `$DSH_HOME/plugins/dsh-models-dev/bootstrap.log`
+（模块导入 → apply → 各步骤 → 失败堆栈）：没有日志 exporter 的部署里，
+"Running" 状态会掩盖一切失败。
 
 ## 开发
 
 ```
-npm run verify   # 语法检查 + 单元测试 + smoke（models.dev 实测尽力而为）
+npm install
+npm run verify      # 语法 + 单元测试 + 线上 smoke
+npm run bootstrap   # 用桩 ctx 重放宿主组合
 ```
-
-## 许可证
-
-MIT

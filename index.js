@@ -1,64 +1,48 @@
-// dsh-models-dev — live models.dev catalog for DeepSeek Harness LLM providers.
+// dsh-models-dev — keep every hooked-up provider's model catalog current with
+// the living models.dev catalog.
 //
-// Why: dsh-llm-pi-ai resolves routes against pi-ai's vendored model catalog, a
-// build-time snapshot of models.dev that goes stale between releases (e.g.
-// mimo-v2.6-* reachable on OpenCode Go while every installed catalog lacked
-// them). This plugin fetches https://models.dev/api.json at startup and on a
-// TTL, maps each configured provider's models onto pi-ai model entries, and
-// registers the routes through the same ctx.llm seam llm-pi-ai uses — so
-// providers and models come from the living catalog instead of the snapshot.
+// Why: providers configured in dsh carry model rows whose modalities and
+// thinking levels drift stale (and new models never appear) between releases.
+// This plugin does not register routes of its own — no duplicated providers.
+// Instead it refreshes the `models` array of the providers already configured
+// (llm-pi-ai family: the rows the Models page's capability editor edits) from
+// https://models.dev/api.json: new models appended, existing models updated in
+// place, hand-added models left alone.
 //
-// Modes: give a route a key llm-pi-ai does not serve (e.g. `opencode-go-live`)
-// to coexist, or remove the route from llm-pi-ai.providers and reuse its key
-// here (e.g. `opencode-go`) to replace it.
+// Surfaces: an automatic sweep at bootstrap and on a timer (`autoSync`,
+// `refreshHours`), and one loopback endpoint the "update models from models.dev
+// API" button in the capability editor drives per provider.
 //
-// Host classes (PiAiAdapter, createProvider, LlmError) are resolved from the
-// running dsh's own module instances via lib/runtime.mjs.
+// A bootstrap trace in $DSH_HOME/plugins/dsh-models-dev/bootstrap.log keeps the
+// async chain auditable — a deployment without a logger exporter would
+// otherwise swallow every failure behind a "Running" fiber.
 
 import z from '@deepseek-ai/schemastery';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createRegistry } from './lib/registry.mjs';
+import { syncRoutes, TARGET_NS } from './lib/service.mjs';
 import { ModelsDevSync } from './lib/sync.mjs';
-import { loadHostModules } from './lib/runtime.mjs';
 
 /** Cordis plugin name (the Loader entry). */
 export const name = 'dsh-models-dev';
 
-/** Services required before load: the LLM seam we register into. */
+/** Services required before load: the llm directory tells us what is hooked up. */
 export const inject = ['llm'];
 
 const NS = 'dsh-models-dev';
 const DEFAULT_URL = 'https://models.dev/api.json';
 const MIN_REFRESH_HOURS = 0.05;
+const REFRESH_PATH = '/api/dsh-models-dev/refresh';
+const MAX_BODY_BYTES = 64 * 1024;
 
-const modelProfile = z.object({
-  id: z.string(),
-  name: z.string().required(false),
-  contextWindow: z.number().required(false),
-  maxTokens: z.number().required(false),
-  input: z.array(z.string()).required(false),
-  reasoning: z.boolean().required(false),
-});
-
-const providerProfile = z.object({
-  source: z.string().required(false),
-  displayName: z.string().required(false),
-  apiKeyEnv: z.string().required(false),
-  baseURL: z.string().required(false),
-  api: z.string().required(false),
-  defaultContextWindow: z.number().required(false),
-  defaultMaxTokens: z.number().required(false),
-  models: z.array(modelProfile).required(false),
-});
-
-/** Plugin configuration: the models.dev-backed provider routes this instance owns. */
+/** Plugin configuration: where the living catalog lives and when to sweep. */
 export const Config = z.object({
   modelsDevUrl: z.string().default(DEFAULT_URL),
   refreshHours: z.number().min(MIN_REFRESH_HOURS).default(24),
   cachePath: z.string().required(false),
-  providers: z.dict(providerProfile).default({}),
+  autoSync: z.boolean().default(true),
+  sources: z.dict(z.string()).default({}),
 });
 
 function dshHome() {
@@ -67,14 +51,6 @@ function dshHome() {
 
 /**
  * Append-only bootstrap trace under this plugin's state dir.
- *
- * The bootstrap is an async chain (host modules → registry → catalog → settings
- * section) whose failures land in `ctx.logger`; a deployment that wires no
- * logger exporter buffers them where nobody reads them, leaving a "Running"
- * fiber that registered nothing. The trace separates "the entry imported the
- * module" from "apply() was called" from each bootstrap step, and never throws
- * into the plugin.
- *
  * @param line - one trace record; the writer adds a UTC stamp and the pid.
  */
 function trace(line) {
@@ -89,32 +65,70 @@ function trace(line) {
 
 trace('module: imported');
 
+/** Answer one JSON response. */
+function writeJson(res, status, value) {
+  try {
+    res.setHeader?.('content-type', 'application/json; charset=utf-8');
+    res.writeHead(status);
+    res.end(JSON.stringify(value));
+  } catch {
+    // the socket went away mid-answer; nothing to recover
+  }
+}
+
+/** Read one small JSON request body (empty bodies read as {}). */
+async function readJsonBody(req) {
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) throw new Error('request body too large');
+    chunks.push(chunk);
+  }
+  const raw = Buffer.concat(chunks).toString('utf8').trim();
+  return raw.length === 0 ? {} : JSON.parse(raw);
+}
+
+/** The shared fence: loopback only (a trusted LAN request is replayed as one). */
+function isLoopback(req) {
+  const address = req.socket?.remoteAddress ?? '';
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
 export function apply(ctx, config) {
   let current = () => config;
-  trace(`apply: called (loader routes=${Object.keys(config?.providers ?? {}).join(',') || 'none'})`);
+  trace(`apply: called (loader autoSync=${config?.autoSync}, sources=${Object.keys(config?.sources ?? {}).join(',') || 'none'})`);
 
-  // Registry and catalog sync exist only once the bootstrap reaches them: the
-  // settings section reports a change synchronously while installing, before
-  // this holder is filled.
-  const state = { registry: undefined, sync: undefined };
+  /** The pieces the sweep and the endpoint need; filled by the bootstrap. */
+  const state = { sync: undefined, settings: undefined };
 
-  const rebuild = async ({ force = false } = {}) => {
-    const { registry, sync } = state;
-    if (registry === undefined || sync === undefined) return;
+  /**
+   * One sweep: one catalog read, then every hooked-up pi-ai route (or only the
+   * named ones). A route the catalog does not describe is reported and skipped.
+   */
+  const runSync = async ({ force = false, routes } = {}) => {
+    const { sync, settings } = state;
+    if (sync === undefined || settings === undefined) return [];
     const cfg = current();
-    const routes = Object.keys(cfg.providers ?? {});
-    trace(`catalog: loading (force=${force}, routes=${routes.join(',') || 'none'})`);
+    trace(`refresh: loading catalog (force=${force}${routes === undefined ? '' : `, routes=${routes.join(',')}`})`);
     const { data, stale } = await sync.load({ force });
-    trace(`catalog: ${Object.keys(data ?? {}).length} providers (stale=${stale})`);
+    trace(`refresh: catalog ${Object.keys(data ?? {}).length} providers (stale=${stale})`);
     if (stale) ctx.logger?.warn?.(`${NS}: models.dev unreachable — serving the cached catalog`);
-    registry.update(cfg.providers ?? {}, data);
-    trace('catalog: routes registered');
+    const wanted = routes === undefined ? undefined : new Set(routes);
+    const providers = (ctx.llm?.listConfigurableProviders?.() ?? []).filter(
+      (row) => row?.settingsNs === TARGET_NS && (wanted === undefined || wanted.has(row.provider)),
+    );
+    const results = await syncRoutes({ settings, providers, catalog: data, sources: cfg.sources ?? {} });
+    trace(`refresh: ${JSON.stringify(results)}`);
+    return results;
   };
 
+  /** A settings change swaps the live source first; the models follow. */
   const onSettingsChange = () => {
-    void rebuild().catch((error) => ctx.logger?.error?.(`${NS}: keeping the previously registered routes after a refused update`, error));
+    void runSync().catch((error) => ctx.logger?.error?.(`${NS}: keeping the previously refreshed models after a refused update`, error));
   };
 
+  /** The settings section owns the live config values (see the sync's source swap). */
   const installSettings = (settings) => {
     try {
       settings.installSection(ctx, NS, Config, config, {
@@ -124,6 +138,7 @@ export function apply(ctx, config) {
         },
         onChange: onSettingsChange,
       });
+      state.settings = settings;
       trace('bootstrap: settings section installed');
     } catch (error) {
       trace(`bootstrap: installSection FAILED — ${error?.stack ?? error}`);
@@ -131,22 +146,25 @@ export function apply(ctx, config) {
     }
   };
 
+  /** POST {route?}: the refresh button's endpoint; no body sweeps everything. */
+  const handleRefresh = (req, res) => {
+    if (!isLoopback(req)) return void writeJson(res, 403, { ok: false, error: 'forbidden: loopback-only' });
+    if (req.method !== 'POST') return void writeJson(res, 405, { ok: false, error: 'method-not-allowed' });
+    return readJsonBody(req)
+      .then((body) => {
+        const route = typeof body?.route === 'string' && body.route.length > 0 ? [body.route] : undefined;
+        return runSync({ force: true, routes: route });
+      })
+      .then(
+        (results) => writeJson(res, 200, { ok: true, results }),
+        (error) => writeJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) }),
+      );
+  };
+
   void (async () => {
     try {
       trace('bootstrap: start');
-      const mods = await loadHostModules();
-      trace(`bootstrap: host modules resolved (${Object.keys(mods).join(',')})`);
-      const registry = createRegistry(ctx, mods);
-      trace('bootstrap: registry created');
-
-      // The settings section owns the live values. installSection swaps `current`
-      // for a getter over the resolved namespace (schema defaults ← this loader
-      // entry ← the settings.yaml user layer) and pings onChange, so it has to be
-      // installed BEFORE the first catalog load: the loader entry this plugin is
-      // composed with carries no providers — they live in settings.yaml. Loading
-      // the catalog first read an empty route set, and the seam's refusal of an
-      // empty configurable-provider registration aborted the whole bootstrap.
-      const settings = ctx.get?.('settings');
+      const settings = ctx.get?.('settings') ?? ctx.settings;
       if (settings !== undefined) installSettings(settings);
       else trace('bootstrap: settings service not up yet — installing when it appears');
 
@@ -157,20 +175,26 @@ export function apply(ctx, config) {
         ttlMs: Math.max(MIN_REFRESH_HOURS, cfg.refreshHours ?? 24) * 60 * 60 * 1000,
         logger: ctx.logger,
       });
-      state.registry = registry;
       state.sync = sync;
+      trace('bootstrap: catalog sync ready');
 
-      await rebuild();
+      const webServer = ctx.get?.('webServer', false) ?? ctx.webServer;
+      if (webServer !== undefined && typeof webServer.register === 'function') {
+        webServer.register({ kind: 'exact', path: REFRESH_PATH, handler: handleRefresh });
+        trace(`bootstrap: refresh endpoint on ${REFRESH_PATH}`);
+      } else {
+        trace('bootstrap: webserver seat not available — endpoint not registered');
+      }
+
+      // The automatic check for everything hooked up: once here (the catalog
+      // cache decides whether models.dev needs a fetch), then every refresh.
+      if (cfg.autoSync !== false) await runSync();
 
       const timer = setInterval(() => {
-        void rebuild({ force: true }).catch((error) => ctx.logger?.error?.(`${NS}: catalog refresh failed`, error));
+        void runSync({ force: true }).catch((error) => ctx.logger?.error?.(`${NS}: catalog refresh failed`, error));
       }, Math.max(MIN_REFRESH_HOURS, current().refreshHours ?? 24) * 60 * 60 * 1000);
       timer.unref?.();
-
-      ctx.on?.('dispose', () => {
-        clearInterval(timer);
-        registry.dispose();
-      });
+      ctx.on?.('dispose', () => clearInterval(timer));
 
       if (settings === undefined) {
         ctx.inject(['settings'], (settingsCtx) => {
@@ -181,7 +205,7 @@ export function apply(ctx, config) {
       trace('bootstrap: done');
     } catch (error) {
       trace(`bootstrap: FAILED — ${error?.stack ?? error}`);
-      ctx.logger?.error?.(`${NS}: bootstrap failed — no models.dev routes registered`);
+      ctx.logger?.error?.(`${NS}: bootstrap failed — models were not refreshed`);
       ctx.logger?.error?.(error);
     }
   })();

@@ -1,180 +1,134 @@
 // test/bootstrap.test.mjs — the composition the host actually performs.
 //
-// Regression for the deployment failure: a bundle entry carries NO config (the
-// providers live in settings.yaml and arrive through the settings section), and
-// the llm seam refuses an empty configurable-provider registration by design.
-// Loading the catalog before the settings section therefore threw
-// ERR INVALID_DIRECTORY ("must declare at least one provider") and aborted the
-// whole bootstrap — no routes, no settings section, and a fiber that still
-// reported "Running".
-//
-// The harness builds a fake host package tree so the test needs no dsh
-// checkout: those stubs mirror the shapes the plugin resolves by name, and
-// pi-ai's exports carry an `import` condition only, like the real 0.85.x.
+// The refresh replaces the old route-duplication approach: apply() installs the
+// plugin's settings section, sweeps every hooked-up provider against one
+// models.dev read (at bootstrap and on the refresh timer), and serves one HTTP
+// endpoint the "update models from models.dev API" button drives. It must never
+// register routes of its own — the point is to keep the existing providers
+// current, not to duplicate them.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 const NS = 'dsh-models-dev';
-const ROUTE = 'opencode-go-live';
+const REFRESH_PATH = '/api/dsh-models-dev/refresh';
 
-/** A minimal models.dev catalog entry that maps to one OpenAI-completions model. */
+/** One models.dev model record. */
+const model = (id, overrides = {}) => ({
+  id,
+  name: id.toUpperCase(),
+  tool_call: true,
+  modalities: { input: ['text'], output: ['text'] },
+  limit: { context: 1000, output: 100 },
+  ...overrides,
+});
+
+/** One catalog payload, as ModelsDevSync delivers it. */
 const CATALOG = {
-  'opencode-go': {
-    id: 'opencode-go',
-    npm: '@ai-sdk/openai-compatible',
-    api: 'https://opencode.ai/zen/go/v1',
-    name: 'OpenCode Go',
-    models: {
-      'mimo-v2.6-pro': {
-        id: 'mimo-v2.6-pro',
-        name: 'MiMo-V2.6-Pro',
-        tool_call: true,
-        reasoning: true,
-        modalities: { input: ['text'], output: ['text'] },
-        limit: { context: 1048576, output: 131072 },
-        cost: { input: 0.435, output: 0.87, cache_read: 0.003625 },
-      },
-    },
-  },
+  'opencode-go': { models: { a: model('a'), b: model('b', { modalities: { input: ['text', 'image'], output: ['text'] } }) } },
+  zai: { models: { c: model('c') } },
 };
 
-/** Write one fake package; `exports` mirrors the real maps (import-only where noted). */
-function writePackage(root, name, manifest, files) {
-  const dir = join(root, 'node_modules', ...name.split('/'));
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name, version: '0.0.0-test', type: 'module', ...manifest }));
-  for (const [file, body] of Object.entries(files)) {
-    const target = join(dir, file);
-    mkdirSync(join(target, '..'), { recursive: true });
-    writeFileSync(target, body);
-  }
+const PROVIDER_ROWS = [
+  { provider: 'opencode-go', displayName: 'opencode-go', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'opencode-go'] },
+  { provider: 'zai', displayName: 'zai', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'zai'] },
+  { provider: 'deepseek', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: ['providers', 'deepseek'] },
+];
+
+/** A minimal HTTP request body reader the endpoint accepts. */
+function fakeRequest(payload) {
+  const body = Buffer.from(JSON.stringify(payload ?? {}));
+  return {
+    method: 'POST',
+    url: REFRESH_PATH,
+    headers: {},
+    socket: { remoteAddress: '127.0.0.1' },
+    async *[Symbol.asyncIterator]() {
+      yield body;
+    },
+  };
+}
+
+/** A minimal response sink capturing the status code and JSON body. */
+function fakeResponse() {
+  const captured = { status: undefined, body: undefined };
+  return {
+    captured,
+    setHeader() {},
+    writeHead(status) {
+      captured.status = status;
+    },
+    end(chunk) {
+      if (chunk !== undefined) captured.body = JSON.parse(String(chunk));
+    },
+  };
 }
 
 /**
- * The host package tree the plugin resolves through process.argv[1].
- * pi-ai keeps its real shape: exports declare `import` alone, so require.resolve
- * cannot see it and only the exports-map fallback can.
+ * Build the host-shaped context: settings seam, llm directory, webserver seat.
+ * The llm seam throws on any route registration — the refresh owns none.
  */
-function writeHostTree(home) {
-  const importOnly = { types: undefined, import: undefined };
-  writePackage(
-    home,
-    '@earendil-works/pi-ai',
-    {
-      exports: {
-        '.': { ...importOnly, import: './index.js' },
-        './api/*': { ...importOnly, import: './api/*.js' },
-      },
-    },
-    {
-      'index.js':
-        'export const InMemoryCredentialStore = class {};\n' +
-        'export const defaultProviderAuthContext = () => ({});\n' +
-        'export const envApiKeyAuth = () => ({});\n' +
-        'export const createProvider = (config) => ({ config });\n',
-      'api/anthropic-messages.lazy.js': 'export const anthropicMessagesApi = () => ({});\n',
-      'api/openai-completions.lazy.js': 'export const openAICompletionsApi = () => ({});\n',
-      'api/openai-responses.lazy.js': 'export const openAIResponsesApi = () => ({});\n',
-    },
-  );
-  writePackage(home, '@deepseek-ai/dsh-llm-pi-ai', { exports: { '.': './index.js' } }, {
-    'index.js':
-      'export class PiAiAdapter {\n' +
-      '  constructor(options) { this.options = options; }\n' +
-      '  providerInfo(provider) {\n' +
-      '    const profile = this.options.profiles().get(provider);\n' +
-      '    return { id: provider, name: profile?.displayName ?? provider };\n' +
-      '  }\n' +
-      '}\n',
-  });
-  writePackage(home, '@deepseek-ai/dsh-llm', { exports: { '.': './index.js' } }, {
-    'index.js':
-      'export class LlmError extends Error {\n' +
-      '  constructor(message, code) { super(message); this.code = code; }\n' +
-      '}\n' +
-      'export const assertUsableApiKey = (key) => key;\n' +
-      'export const resolveRetryPolicy = () => ({});\n',
-  });
-  writePackage(home, '@deepseek-ai/dsh-credentials', { exports: { '.': './index.js' } }, {
-    'index.js': 'export const isCredentialRefName = () => false;\nexport const credentialRef = (name) => name;\n',
-  });
-  writePackage(home, '@deepseek-ai/dsh-launch-environment', { exports: { '.': './index.js' } }, {
-    'index.js': 'export const launchEnvironmentOf = () => ({ get: () => undefined });\n',
-  });
-  const anchorDir = join(home, 'host');
-  mkdirSync(anchorDir, { recursive: true });
-  const anchor = join(anchorDir, 'anchor.js');
-  writeFileSync(anchor, '// createRequire anchor inside the fake host tree\n');
-  return anchor;
-}
-
-/**
- * Build the host-shaped context: a rejecting llm seam, a settings service that
- * delivers a resolved value, and a fresh catalog cache so no test hits the net.
- */
-function harness({ withSettings = true, providers } = {}) {
+function harness({ autoSync = true, sources = {}, views } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-models-dev-boot-'));
-  const anchor = writeHostTree(home);
   const cachePath = join(home, 'models.dev.json');
   writeFileSync(cachePath, JSON.stringify({ fetchedAt: new Date().toISOString(), data: CATALOG }));
   process.env.DSH_HOME = home;
-  process.argv[1] = anchor;
 
-  const resolved = {
-    modelsDevUrl: 'https://models.dev/api.json',
-    refreshHours: 24,
-    cachePath,
-    providers:
-      providers ?? {
-        [ROUTE]: { source: 'opencode-go', apiKeyEnv: 'OPENCODE_GO_API_KEY', displayName: 'OpenCode Go (models.dev live)' },
-      },
-  };
-
+  // An unreachable catalog URL keeps the suite hermetic: forced sweeps fail
+  // fast and fall back to the fixture cache instead of hitting models.dev.
+  const resolved = { modelsDevUrl: 'http://127.0.0.1:9/unreachable', refreshHours: 24, cachePath, autoSync, sources };
   const sections = [];
-  const adapters = [];
-  const directories = [];
+  const writes = [];
+  const routes = [];
   const errors = [];
-
-  const llm = {
-    registerConfigurableProviders: (entries) => {
-      if (entries.length === 0) {
-        throw new Error('LlmError: a configurable-provider registration must declare at least one provider');
-      }
-      directories.push(...entries.map((entry) => entry.provider));
-      return Object.assign(() => {}, { replace: () => {} });
-    },
-    registerAdapter: (routes) => {
-      if (routes.length === 0) throw new Error('LlmError: an adapter must register at least one provider');
-      adapters.push(...routes);
-      return Object.assign(() => {}, { replace: () => {} });
-    },
-    registerModelDiscovery: () => {},
-  };
+  const namespaceViews = views ?? [{ ns: 'llm-pi-ai', value: {}, user: {}, revision: 5 }];
 
   const settings = {
-    installSection: (_owner, ns, _schema, _entry, hooks) => {
+    installSection(_owner, ns, _schema, _entry, hooks) {
       if (sections.includes(ns)) throw new Error(`settings namespace "${ns}" is already registered`);
       sections.push(ns);
       hooks.setSource(() => resolved);
       hooks.onChange();
+    },
+    describe: () => namespaceViews,
+    mutate: async (ns, ops, expectedRevision) => {
+      writes.push({ ns, ops, expectedRevision });
+    },
+  };
+
+  const llm = {
+    listConfigurableProviders: () => PROVIDER_ROWS,
+    registerAdapter() {
+      throw new Error('the refresh must not register llm routes');
+    },
+    registerConfigurableProviders() {
+      throw new Error('the refresh must not register llm routes');
+    },
+    registerModelDiscovery() {
+      throw new Error('the refresh must not register llm routes');
+    },
+  };
+
+  const webServer = {
+    register(route) {
+      routes.push(route);
+      return () => {};
     },
   };
 
   const ctx = {
     logger: { info: () => {}, debug: () => {}, warn: () => {}, error: (...args) => errors.push(args) },
     llm,
-    get: (name) => (name === 'settings' && withSettings ? settings : undefined),
+    webServer,
+    get: (name) => (name === 'settings' ? settings : name === 'webServer' ? webServer : undefined),
     on: () => {},
     effect: () => {},
-    inject: (_deps, callback) => {
-      if (withSettings) callback({ settings });
-    },
+    inject: (_deps, callback) => callback({ settings }),
   };
 
-  return { ctx, home, resolved, sections, adapters, directories, errors };
+  return { ctx, home, sections, writes, routes, errors };
 }
 
 /** Wait until the plugin's own trace reports the bootstrap finished. */
@@ -194,46 +148,69 @@ async function waitForBootstrap(home, timeoutMs = 5000) {
   return text;
 }
 
-/** Import the plugin after DSH_HOME and the host anchor point at the harness. */
+/** Import the plugin after DSH_HOME points at the harness state dir. */
 async function loadPlugin() {
   return import(new URL('../index.js', import.meta.url).href);
 }
 
-test('the host composition registers the routes and the settings section', async () => {
+test('apply installs the settings section and refreshes every hooked-up route', async () => {
   const h = harness();
   const { apply } = await loadPlugin();
-  apply(h.ctx, {}); // the bundle entry carries no config — providers come from settings
+  apply(h.ctx, {});
   const trace = await waitForBootstrap(h.home);
 
   assert.equal(h.errors.length, 0, `bootstrap logged errors: ${JSON.stringify(h.errors)}`);
   assert.deepEqual(h.sections, [NS], 'the settings section is installed exactly once');
-  assert.ok(h.adapters.includes(ROUTE), `adapter routes: ${h.adapters.join(', ') || 'none'}`);
-  assert.ok(h.directories.includes(ROUTE), `directory entries: ${h.directories.join(', ') || 'none'}`);
+  assert.deepEqual(h.writes.map((write) => write.ops[0].path[1]), ['opencode-go', 'zai'], 'both pi-ai routes are refreshed; deepseek is left alone');
+  assert.equal(h.writes[0].expectedRevision, 5);
+  assert.deepEqual(h.writes[0].ops[0].value, [
+    { id: 'a', name: 'A', contextWindow: 1000, maxTokens: 100, input: ['text'] },
+    { id: 'b', name: 'B', contextWindow: 1000, maxTokens: 100, input: ['text', 'image'] },
+  ]);
   assert.match(trace, /bootstrap: done/);
   assert.doesNotMatch(trace, /bootstrap: FAILED/);
 });
 
-test('a deployment with no configured routes is a no-op, not a fatal error', async () => {
-  const h = harness({ providers: {} });
+test('apply serves the refresh endpoint the icon drives', async () => {
+  const h = harness();
   const { apply } = await loadPlugin();
   apply(h.ctx, {});
-  const trace = await waitForBootstrap(h.home);
+  await waitForBootstrap(h.home);
 
-  assert.equal(h.errors.length, 0, `bootstrap logged errors: ${JSON.stringify(h.errors)}`);
-  assert.deepEqual(h.adapters, [], 'no adapter is registered without routes');
-  assert.deepEqual(h.directories, [], 'the empty directory registration is withdrawn, not attempted');
-  assert.match(trace, /bootstrap: done/);
-  assert.doesNotMatch(trace, /bootstrap: FAILED/);
+  const route = h.routes.find((candidate) => candidate.path === REFRESH_PATH);
+  assert.ok(route, `registered routes: ${h.routes.map((candidate) => candidate.path).join(', ') || 'none'}`);
+  assert.equal(route.kind, 'exact');
+
+  h.writes.length = 0;
+  const res = fakeResponse();
+  await route.handler(fakeRequest({ route: 'zai' }), res);
+
+  assert.equal(res.captured.status, 200);
+  assert.deepEqual(res.captured.body, { ok: true, results: [{ route: 'zai', source: 'zai', added: 1, updated: 0 }] });
+  assert.deepEqual(h.writes.map((write) => write.ops[0].path[1]), ['zai'], 'the endpoint refreshes exactly the requested route');
 });
 
-test('a missing settings service leaves the loader config in charge without crashing', async () => {
-  const h = harness({ withSettings: false });
+test('apply skips the automatic sweep when autoSync is off', async () => {
+  const h = harness({ autoSync: false });
   const { apply } = await loadPlugin();
   apply(h.ctx, {});
   const trace = await waitForBootstrap(h.home);
 
-  assert.equal(h.errors.length, 0, `bootstrap logged errors: ${JSON.stringify(h.errors)}`);
-  assert.deepEqual(h.sections, [], 'no settings service means no section to install');
+  assert.deepEqual(h.writes, [], 'no automatic write');
+  assert.equal(h.routes.length, 1, 'the manual refresh endpoint stays available');
   assert.match(trace, /bootstrap: done/);
-  assert.doesNotMatch(trace, /bootstrap: FAILED/);
+});
+
+test('apply follows the sources override for custom route keys', async () => {
+  const h = harness({
+    sources: { zai: 'opencode-go' },
+    views: [{ ns: 'llm-pi-ai', value: {}, user: {}, revision: 2 }],
+  });
+  const { apply } = await loadPlugin();
+  apply(h.ctx, {});
+  await waitForBootstrap(h.home);
+
+  const zai = h.writes.find((write) => write.ops[0].path[1] === 'zai');
+  assert.ok(zai, 'the zai route is refreshed');
+  assert.deepEqual(zai.ops[0].value.map((entry) => entry.id), ['a', 'b'], 'its models come from the opencode-go source');
 });

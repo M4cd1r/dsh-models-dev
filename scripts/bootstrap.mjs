@@ -1,95 +1,75 @@
 // scripts/bootstrap.mjs — prove the plugin bootstraps inside the running dsh.
 //
-// Mirrors the host composition faithfully, because the two details that broke it
-// in production are exactly the ones a naive stub hides:
-//   * the loader entry carries NO config — providers live in settings.yaml and
-//     arrive through the settings section's setSource hook;
-//   * the llm seam refuses an empty configurable-provider registration by design.
-// The stub llm therefore rejects an empty registration like the real one does,
-// and the stub settings service delivers a resolved value on install.
+// Mirrors the host composition: the settings section swaps the live config in,
+// the llm directory lists what is hooked up, the webserver seat carries the
+// refresh endpoint, and the llm seam refuses any route registration (the
+// refresh owns none — duplicating providers is what this plugin replaced).
 //
 // Usage: node scripts/bootstrap.mjs [path/to/index.js]
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const CANDIDATES = [
-  process.env.DSH_MODELS_DEV_DSH_BIN,
-  'C:/Users/admin/AppData/Local/hermes/node/node_modules/@deepseek-ai/dsh/lib/bin.js',
-];
-const anchor = CANDIDATES.find((candidate) => typeof candidate === 'string' && existsSync(candidate));
-if (anchor === undefined) {
-  console.log('bootstrap: skipped (no dsh checkout on this machine)');
-  process.exit(0);
-}
-process.argv[1] = anchor;
-
 const NS = 'dsh-models-dev';
-const ROUTE = 'opencode-go-live';
+const REFRESH_PATH = '/api/dsh-models-dev/refresh';
 const pluginIndex = process.argv[2] ?? fileURLToPath(new URL('../index.js', import.meta.url));
 
+const model = (id, overrides = {}) => ({
+  id,
+  name: id.toUpperCase(),
+  tool_call: true,
+  modalities: { input: ['text'], output: ['text'] },
+  limit: { context: 1000, output: 100 },
+  ...overrides,
+});
+
 const CATALOG = {
-  'opencode-go': {
-    id: 'opencode-go',
-    npm: '@ai-sdk/openai-compatible',
-    api: 'https://opencode.ai/zen/go/v1',
-    name: 'OpenCode Go',
-    models: {
-      'mimo-v2.6-pro': {
-        id: 'mimo-v2.6-pro',
-        name: 'MiMo-V2.6-Pro',
-        tool_call: true,
-        reasoning: true,
-        modalities: { input: ['text'], output: ['text'] },
-        limit: { context: 1048576, output: 131072 },
-        cost: { input: 0.435, output: 0.87, cache_read: 0.003625 },
-      },
-    },
-  },
+  'opencode-go': { models: { a: model('a'), b: model('b', { modalities: { input: ['text', 'image'], output: ['text'] } }) } },
+  zai: { models: { c: model('c') } },
 };
 
-// Always a fresh state dir: the plugin's trace is append-only, so reusing an
-// existing $DSH_HOME would let a previous run's markers decide this run's verdict.
+const PROVIDER_ROWS = [
+  { provider: 'opencode-go', displayName: 'opencode-go', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'opencode-go'] },
+  { provider: 'zai', displayName: 'zai', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'zai'] },
+  { provider: 'deepseek', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: ['providers', 'deepseek'] },
+];
+
 const home = mkdtempSync(join(tmpdir(), 'dsh-models-dev-bootstrap-'));
 process.env.DSH_HOME = home;
 const cachePath = join(home, 'bootstrap-catalog.json');
 writeFileSync(cachePath, JSON.stringify({ fetchedAt: new Date().toISOString(), data: CATALOG }));
 
-const RESOLVED = {
-  modelsDevUrl: 'https://models.dev/api.json',
-  refreshHours: 24,
-  cachePath,
-  providers: {
-    [ROUTE]: { source: 'opencode-go', apiKeyEnv: 'OPENCODE_GO_API_KEY', displayName: 'OpenCode Go (models.dev live)' },
-  },
-};
+const RESOLVED = { modelsDevUrl: 'http://127.0.0.1:9/unreachable', refreshHours: 24, cachePath, autoSync: true, sources: {} };
 
 const sections = [];
-const adapters = [];
-const directories = [];
+const writes = [];
+const routes = [];
 const errors = [];
 
-const llm = {
-  registerConfigurableProviders: (entries) => {
-    if (entries.length === 0) throw new Error('LlmError: a configurable-provider registration must declare at least one provider');
-    directories.push(...entries.map((entry) => entry.provider));
-    return Object.assign(() => {}, { replace: () => {} });
-  },
-  registerAdapter: (routes) => {
-    if (routes.length === 0) throw new Error('LlmError: an adapter must register at least one provider');
-    adapters.push(...routes);
-    return Object.assign(() => {}, { replace: () => {} });
-  },
-  registerModelDiscovery: () => {},
-};
-
 const settings = {
-  installSection: (_owner, ns, _schema, _entry, hooks) => {
-    if (sections.includes(ns)) throw new Error(`settings namespace "${ns}" is already registered`);
+  installSection(_owner, ns, _schema, _entry, hooks) {
     sections.push(ns);
     hooks.setSource(() => RESOLVED);
     hooks.onChange();
+  },
+  describe: () => [{ ns: 'llm-pi-ai', value: {}, user: {}, revision: 4 }],
+  mutate: async (ns, ops, expectedRevision) => {
+    writes.push({ ns, ops, expectedRevision });
+  },
+};
+
+const llm = {
+  listConfigurableProviders: () => PROVIDER_ROWS,
+  registerAdapter() { throw new Error('the refresh must not register llm routes'); },
+  registerConfigurableProviders() { throw new Error('the refresh must not register llm routes'); },
+  registerModelDiscovery() { throw new Error('the refresh must not register llm routes'); },
+};
+
+const webServer = {
+  register(route) {
+    routes.push(route);
+    return () => {};
   },
 };
 
@@ -101,14 +81,15 @@ const ctx = {
     error: (...args) => errors.push(args.map((arg) => (arg instanceof Error ? arg.message : String(arg))).join(' ')),
   },
   llm,
-  get: (name) => (name === 'settings' ? settings : undefined),
+  webServer,
+  get: (name) => (name === 'settings' ? settings : name === 'webServer' ? webServer : undefined),
   on: () => {},
   effect: () => {},
   inject: (_deps, callback) => callback({ settings }),
 };
 
 const { apply } = await import(pathToFileURL(pluginIndex).href);
-apply(ctx, {}); // the bundle entry carries no config, exactly like the deployment
+apply(ctx, {});
 
 const tracePath = join(home, 'plugins', NS, 'bootstrap.log');
 const deadline = Date.now() + 20000;
@@ -118,11 +99,36 @@ while (Date.now() < deadline) {
 }
 const trace = existsSync(tracePath) ? readFileSync(tracePath, 'utf8') : '';
 
+// One manual refresh through the endpoint the icon drives.
+const route = routes.find((candidate) => candidate.path === REFRESH_PATH);
+let manual = 'endpoint missing';
+let manualOk = false;
+if (route !== undefined) {
+  const body = Buffer.from(JSON.stringify({ route: 'zai' }));
+  const req = {
+    method: 'POST',
+    url: REFRESH_PATH,
+    socket: { remoteAddress: '127.0.0.1' },
+    async *[Symbol.asyncIterator]() { yield body; },
+  };
+  const captured = { status: undefined, body: undefined };
+  const res = {
+    setHeader() {},
+    writeHead(status) { captured.status = status; },
+    end(chunk) { if (chunk !== undefined) captured.body = JSON.parse(String(chunk)); },
+  };
+  await route.handler(req, res);
+  manual = `POST ${REFRESH_PATH} {route:zai} -> ${captured.status} ${JSON.stringify(captured.body)}`;
+  manualOk = captured.status === 200 && captured.body?.ok === true && captured.body.results?.[0]?.route === 'zai';
+}
+
+const swept = writes.map((write) => write.ops[0].path[1]);
 const problems = [];
 if (!sections.includes(NS)) problems.push(`no settings section for "${NS}"`);
-if (!adapters.includes(ROUTE)) problems.push(`no adapter route "${ROUTE}" (registered: ${adapters.join(', ') || 'none'})`);
-if (!directories.includes(ROUTE)) problems.push(`no directory entry "${ROUTE}" (declared: ${directories.join(', ') || 'none'})`);
-if (!existsSync(cachePath) || statSync(cachePath).size === 0) problems.push(`no catalog cache at ${cachePath}`);
+if (!swept.includes('opencode-go') || !swept.includes('zai')) problems.push(`the automatic sweep wrote: ${swept.join(', ') || 'none'}`);
+if (swept.includes('deepseek')) problems.push('the deepseek row (other namespace) must not be touched');
+if (route === undefined) problems.push(`no refresh endpoint on ${REFRESH_PATH}`);
+else if (!manualOk) problems.push(`manual refresh failed: ${manual}`);
 if (/bootstrap: FAILED/.test(trace)) {
   problems.push(`trace reports a failure:\n${trace.split('\n').filter((line) => line.includes('FAILED')).join('\n')}`);
 }
@@ -133,4 +139,4 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log(`bootstrap: OK — section "${NS}", route "${ROUTE}", directory "${directories.join(',')}", cache ${cachePath}`);
+console.log(`bootstrap: OK — section "${NS}", swept ${swept.join(',')}, ${manual}`);

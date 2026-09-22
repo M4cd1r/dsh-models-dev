@@ -1,70 +1,65 @@
 # dsh-models-dev
 
-**Live [models.dev](https://models.dev) catalog for DeepSeek Harness LLM providers.** ([README.zh.md](README.zh.md))
+Keep DSH provider model catalogs current with the **living** [models.dev](https://models.dev) catalog. ([README.zh.md](README.zh.md))
 
-`dsh-llm-pi-ai` resolves providers and models against pi-ai's **vendored** catalog — a build-time snapshot of models.dev that goes stale between releases. When OpenCode Go added `mimo-v2.6-pro` (2026-09-22), every installed pi-ai catalog still lacked it and dsh refused the route: *"provider "opencode-go" model "mimo-v2.6-pro" needs an api; the installed catalog does not describe it"*.
-
-This plugin replaces that snapshot mechanism for the routes it owns: it fetches `https://models.dev/api.json` at startup and on a TTL, maps each configured provider's models onto pi-ai model entries (wire protocol, endpoint, costs, limits, modalities), and registers the routes through the same `ctx.llm` seam `llm-pi-ai` uses. New models on models.dev show up without waiting for a pi-ai release.
-
-## Install
-
-```
-dsh plugin --profile web add dsh-models-dev
-```
-
-Restart dsh afterwards (the plugin mounts through the profile bundle patch).
-
-## Configure
-
-Settings section `dsh-models-dev` (e.g. in `~/.dsh/settings.yaml`):
-
-```yaml
-dsh-models-dev:
-  refreshHours: 24          # catalog refresh interval (optional)
-  providers:
-    opencode-go:            # dsh route key — THIS key decides coexistence vs replacement
-      source: opencode-go   # models.dev provider id (defaults to the route key)
-      apiKeyEnv: OPENCODE_GO_API_KEY
-```
-
-That is enough: every tool-capable, non-deprecated model models.dev lists for `opencode-go` becomes a selectable dsh model.
-
-**Replace mode** — reuse the key llm-pi-ai serves (`opencode-go`) and *remove* that route from `llm-pi-ai.providers` first; a route key can only be registered by one adapter.
-
-**Coexist mode** — pick a key llm-pi-ai does not serve:
-
-```yaml
-dsh-models-dev:
-  providers:
-    opencode-go-live:
-      source: opencode-go
-      apiKeyEnv: OPENCODE_GO_API_KEY
-      models:                       # optional: serve a subset / override fields
-        - id: mimo-v2.6-pro
-          name: MiMo V2.6 Pro
-          maxTokens: 131072         # explicit maxTokens also becomes the per-request default
-```
-
-Per-route fields: `source`, `displayName`, `apiKeyEnv`, `baseURL`, `api` (force one wire protocol for every model), `defaultContextWindow`, `defaultMaxTokens`, `models` (id + optional `name`/`contextWindow`/`maxTokens`/`input`/`reasoning`/`thinkingLevelMap` overrides; when present, only listed ids are served). A model's `thinkingLevelMap` entry replaces the levels models.dev declares for it, and `false` strips them so a gateway the catalog over-claims for falls back to pi-ai's provider defaults.
+Configured providers in DeepSeek Harness carry model rows whose modalities (image
+input) and thinking levels drift stale between releases, and new models never
+appear. This plugin refreshes the `models` array of the providers you already use
+— new models appended, existing models updated in place, hand-added models left
+alone. It registers **no routes of its own**: no duplicated providers.
 
 ## How it works
 
-1. **Fetch** — `models.dev/api.json` on startup and every `refreshHours`, cached under `$DSH_HOME/plugins/dsh-models-dev/models.dev.json`; on network failure the last cached catalog keeps serving (logged as stale).
-2. **Map** — pure mapping (`lib/map.mjs`) mirroring pi-ai's `generate-models.ts` rules: `provider.npm` (per-model override wins) picks the wire protocol (`@ai-sdk/anthropic` → `anthropic-messages`, `@ai-sdk/openai` → `openai-responses`, else `openai-completions`); `provider.api` is the base URL (Anthropic routes get the SDK-appended `/v1/messages` shape); costs/limits/modalities map 1:1; a model's `reasoning_options` effort values become its `thinkingLevelMap`, so the selectable thinking levels come from models.dev (`none` is the wire spelling for `off`, omitted levels are pinned unsupported); `reasoning_content` interleaving marks replay compatibility. Compat switches pi-ai can detect from provider id + baseURL stay unset, so its own detection decides.
-3. **Register** — one `PiAiAdapter` (reused from `@deepseek-ai/dsh-llm-pi-ai`) serves all routes, registered via `ctx.llm.registerAdapter`, with `registerConfigurableProviders` (settings UI) and `registerModelDiscovery` (models.dev-backed "fetch models"). Host classes are resolved from the running dsh's own module instances, so the seam sees matching class identity.
+1. Fetch `https://models.dev/api.json` (24h TTL cache in
+   `$DSH_HOME/plugins/dsh-models-dev/models.dev.json`, offline fallback).
+2. For every hooked-up route (the llm-pi-ai family rows of the configurable
+   provider directory) map the models.dev records onto `models` entries:
+   `modalities.input` → `input` (image checkbox), `reasoning_options` effort
+   values → `reasoningEfforts` (thinking levels with their wire spellings).
+3. Write the merged array back to `providers.<route>.models` with the settings
+   seam's path ops and revision fencing — the same write the Models page's
+   capability editor performs.
 
-## Limitations
+## Surfaces
 
-- Only the `effort` entries of `reasoning_options` are mapped. `budget_tokens` (`min`/`max`) and `toggle` entries are ignored: pi-ai's thinking levels take a wire value or `null`, which has no budget-range counterpart. A model that declares no effort values (e.g. `mimo-v2.6-pro`) keeps `reasoning: true` with no `thinkingLevelMap`, leaving pi-ai's provider defaults in charge — configure `thinkingLevelMap` per model to override.
-- `google-generative-ai` models are reported as unusable (listed, not dispatchable).
-- Models without `tool_call: true` and `status: deprecated` models are skipped (a coding agent cannot use them).
+- **Automatic check** — one sweep at startup and every `refreshHours` for
+  everything hooked up (`autoSync`).
+- **Refresh button** — in *Settings → Models → (provider) Edit → Model
+  capabilities* header: a globe-with-refresh icon ("update models from models.dev
+  API"). Pressing it refreshes that provider's rows immediately.
+
+```
+POST /api/dsh-models-dev/refresh   body: { "route": "opencode-go" }   # or {} for all
+```
+
+The endpoint is loopback-fenced like the other in-box `/api` routes (a trusted
+LAN request is replayed as loopback by dsh-lan).
+
+## Settings
+
+```yaml
+# ~/.dsh/settings.yaml
+dsh-models-dev:
+  refreshHours: 24        # automatic sweep period (h)
+  autoSync: true          # the automatic check at startup and on the timer
+  modelsDevUrl: https://models.dev/api.json   # optional
+  cachePath: ...          # optional catalog cache override
+  sources:                # optional route -> models.dev provider id overrides
+    my-gateway: opencode-go
+```
+
+Scope: the **llm-pi-ai family** rows (`settingsNs: llm-pi-ai`) — the model shape
+this plugin writes (`input`, `reasoningEfforts`) is that family's schema. Other
+adapters (e.g. the DeepSeek one) declare different shapes and are left alone.
+
+A bootstrap trace is kept in `$DSH_HOME/plugins/dsh-models-dev/bootstrap.log`
+(module import → apply → each step → failure stacks), because a deployment with
+no logger exporter would otherwise hide every failure behind a "Running" fiber.
 
 ## Development
 
 ```
-npm run verify   # syntax check + unit tests + smoke (live models.dev check is best-effort)
+npm install
+npm run verify      # syntax + unit tests + live smoke
+npm run bootstrap   # replay the host composition against a stub ctx
 ```
-
-## License
-
-MIT
