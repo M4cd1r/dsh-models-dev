@@ -10,7 +10,7 @@
   },
   "files": [
     "README.md",
-    "README.pl.md",
+    "README.zh.md",
     "LICENSE",
     "index.js",
     "lib/",

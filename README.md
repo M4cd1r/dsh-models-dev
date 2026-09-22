@@ -1,6 +1,6 @@
 # dsh-models-dev
 
-**Live [models.dev](https://models.dev) catalog for DeepSeek Harness LLM providers.** / Żywy katalog models.dev dla providerów LLM w DeepSeek Harness ([README.pl.md](README.pl.md)).
+**Live [models.dev](https://models.dev) catalog for DeepSeek Harness LLM providers.** ([README.zh.md](README.zh.md))
 
 `dsh-llm-pi-ai` resolves providers and models against pi-ai's **vendored** catalog — a build-time snapshot of models.dev that goes stale between releases. When OpenCode Go added `mimo-v2.6-pro` (2026-09-22), every installed pi-ai catalog still lacked it and dsh refused the route: *"provider "opencode-go" model "mimo-v2.6-pro" needs an api; the installed catalog does not describe it"*.
 
