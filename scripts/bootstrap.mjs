@@ -53,7 +53,9 @@ const settings = {
     hooks.setSource(() => RESOLVED);
     hooks.onChange();
   },
-  describe: () => [{ ns: 'llm-pi-ai', value: {}, user: {}, revision: 4 }],
+  // Both pi-ai rows carry a profile (hooked up); the deepseek row lives in
+  // another namespace and must never be written.
+  describe: () => [{ ns: 'llm-pi-ai', value: { providers: { 'opencode-go': {}, zai: {} } }, user: {}, revision: 4 }],
   mutate: async (ns, ops, expectedRevision) => {
     writes.push({ ns, ops, expectedRevision });
   },

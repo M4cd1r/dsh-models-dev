@@ -51,7 +51,6 @@ test('syncRoutes refreshes every hooked-up pi-ai route and reports counts', asyn
   assert.equal(writes.length, 2, 'the deepseek row (other namespace) is never written');
   assert.deepEqual(writes[0].ops, [
     { op: 'set', path: ['providers', 'opencode-go', 'models'], value: [{ id: 'a', name: 'A', contextWindow: 1000, maxTokens: 100, input: ['text'] }, { id: 'b', name: 'B', contextWindow: 1000, maxTokens: 100, input: ['text', 'image'] }] },
-    { op: 'set', path: ['providers', 'opencode-go', 'api'], value: 'openai-completions' },
   ]);
   assert.deepEqual(writes[1].ops[0].path, ['providers', 'zai', 'models']);
   assert.deepEqual(results, [
@@ -191,26 +190,108 @@ test('syncRoutes only touches routes that are actually hooked up', async () => {
   ]);
 });
 
-test('syncRoutes fills the route api so models the catalog lacks can resolve', async () => {
-  // A model absent from pi-ai's catalog resolves its api off the route profile;
-  // a provider whose catalog mixes protocols has no shared api, so the profile
-  // must name one (llm-pi-ai: "model X needs an api; ... set the route's api").
+test('syncRoutes leaves the wire profile the installed catalog resolves alone', async () => {
+  // The regression behind the fill rules: route "zai" carried no api/baseURL
+  // while pi-ai's installed catalog resolved it to the GLM Coding Plan
+  // endpoint. models.dev's same-named provider is the Z.AI open platform, and
+  // the fill this test forbids pinned its endpoint over the working resolution
+  // — every call then landed on a platform the key has no package for.
   const writes = [];
+  const settings = {
+    describe: () => [{ ns: 'llm-pi-ai', value: { providers: { zai: { models: [] } } }, user: {}, revision: 1 }],
+    mutate: async (ns, ops) => {
+      writes.push({ ns, ops });
+    },
+  };
+  const catalog = { zai: { npm: '@ai-sdk/openai-compatible', api: 'https://api.z.ai/api/paas/v4', models: { c: model('c') } } };
+
+  const results = await syncRoutes({ settings, providers: [PROVIDERS[1]], catalog });
+
+  assert.equal(writes[0].ops.length, 1, 'only the models are written — the catalog resolution is not shadowed');
+  assert.deepEqual(writes[0].ops[0].path, ['providers', 'zai', 'models']);
+  assert.deepEqual(results, [{ route: 'zai', source: 'zai', added: 1, updated: 0 }]);
+});
+
+test('syncRoutes fills the wire fields only when the strict validation refuses the write', async () => {
+  // llm-pi-ai refuses a model that resolves neither api nor base URL through
+  // any layer ("model X needs an api; ... set the route's api"); only that
+  // refusal makes the route profile the right place for the wire values.
+  const writes = [];
+  let calls = 0;
   const settings = {
     describe: () => [{ ns: 'llm-pi-ai', value: { providers: { 'opencode-go': { models: [] } } }, user: {}, revision: 1 }],
     mutate: async (ns, ops) => {
+      calls += 1;
+      if (calls === 1) throw new Error('llm-pi-ai: provider "opencode-go" model "a" needs an api; the installed catalog does not describe it, so set the route\'s api to the wire protocol its endpoint speaks');
+      if (calls === 2) throw new Error('llm-pi-ai: provider "opencode-go" model "a" needs a baseURL; the installed catalog does not describe this route');
       writes.push({ ns, ops });
     },
   };
   const catalog = { 'opencode-go': { npm: '@ai-sdk/openai-compatible', api: 'https://opencode.ai/zen/go/v1', models: { a: model('a') } } };
 
-  await syncRoutes({ settings, providers: [PROVIDERS[0]], catalog });
+  const results = await syncRoutes({ settings, providers: [PROVIDERS[0]], catalog });
 
+  assert.equal(calls, 3, 'models, then one fill per refused field');
   assert.deepEqual(writes[0].ops, [
     { op: 'set', path: ['providers', 'opencode-go', 'models'], value: [{ id: 'a', name: 'A', contextWindow: 1000, maxTokens: 100, input: ['text'] }] },
     { op: 'set', path: ['providers', 'opencode-go', 'api'], value: 'openai-completions' },
     { op: 'set', path: ['providers', 'opencode-go', 'baseURL'], value: 'https://opencode.ai/zen/go/v1' },
   ]);
+  assert.deepEqual(results, [{ route: 'opencode-go', source: 'opencode-go', added: 1, updated: 0, filled: ['api', 'baseURL'] }]);
+});
+
+test('syncRoutes repairs a wire pin an earlier version filled when the source is remapped', async () => {
+  // The value present here is exactly the pin the route-key mapping filled in
+  // 0.1.x. With `sources` naming the Coding Plan provider, keeping that pin
+  // would keep dispatching the open-platform endpoint — repair it.
+  const writes = [];
+  const settings = {
+    describe: () => [{
+      ns: 'llm-pi-ai',
+      value: { providers: { zai: { api: 'openai-completions', baseURL: 'https://api.z.ai/api/paas/v4', models: [] } } },
+      user: {},
+      revision: 5,
+    }],
+    mutate: async (ns, ops) => {
+      writes.push({ ns, ops });
+    },
+  };
+  const catalog = {
+    zai: { npm: '@ai-sdk/openai-compatible', api: 'https://api.z.ai/api/paas/v4', models: { c: model('c') } },
+    'zai-coding-plan': { npm: '@ai-sdk/openai-compatible', api: 'https://api.z.ai/api/coding/paas/v4', models: { c: model('c') } },
+  };
+
+  const results = await syncRoutes({ settings, providers: [PROVIDERS[1]], catalog, sources: { zai: 'zai-coding-plan' } });
+
+  assert.deepEqual(writes[0].ops, [
+    { op: 'set', path: ['providers', 'zai', 'models'], value: [{ id: 'c', name: 'C', contextWindow: 1000, maxTokens: 100, input: ['text'] }] },
+    { op: 'set', path: ['providers', 'zai', 'baseURL'], value: 'https://api.z.ai/api/coding/paas/v4' },
+  ]);
+  assert.deepEqual(results, [{ route: 'zai', source: 'zai-coding-plan', added: 1, updated: 0, repaired: ['baseURL'] }]);
+});
+
+test('syncRoutes never rewrites a wire value that differs from its fill shape', async () => {
+  const writes = [];
+  const settings = {
+    describe: () => [{
+      ns: 'llm-pi-ai',
+      value: { providers: { zai: { api: 'openai-completions', baseURL: 'https://my.proxy/v4', models: [] } } },
+      user: {},
+      revision: 5,
+    }],
+    mutate: async (ns, ops) => {
+      writes.push({ ns, ops });
+    },
+  };
+  const catalog = {
+    zai: { npm: '@ai-sdk/openai-compatible', api: 'https://api.z.ai/api/paas/v4', models: { c: model('c') } },
+    'zai-coding-plan': { npm: '@ai-sdk/openai-compatible', api: 'https://api.z.ai/api/coding/paas/v4', models: { c: model('c') } },
+  };
+
+  await syncRoutes({ settings, providers: [PROVIDERS[1]], catalog, sources: { zai: 'zai-coding-plan' } });
+
+  assert.equal(writes[0].ops.length, 1, 'a user-shaped endpoint is left alone');
+  assert.deepEqual(writes[0].ops[0].path, ['providers', 'zai', 'models']);
 });
 
 test('syncRoutes never overrides a route api the user set', async () => {

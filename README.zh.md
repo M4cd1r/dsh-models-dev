@@ -17,6 +17,22 @@ DeepSeek Harness 里已配置的提供方，其模型行的模态（图片输入
 3. 用设置接口的路径写入与修订号围栏把合并后的数组写回
    `providers.<route>.models`——与「模型能力」编辑器的写入完全一致。
 
+路由的 `api`/`baseURL`（线上端点）比模型行谨慎得多，因为它决定请求发往哪个
+端点、落在哪份账单上。缺失的字段一律保持缺失：llm-pi-ai 的内置目录通常已经
+解析出该字段，用 models.dev 的端点去覆盖正是「把能用的路由指错口味」的根源
+（models.dev 的 `zai` 是 Z.AI **开放平台**，而 pi-ai 的 `zai` 路由是 Z.AI
+**Coding Plan**——钉住开放平台端点后每次调用都会变成
+`429 Insufficient balance or no resource package`）。只有当 llm-pi-ai 的严格
+校验拒绝写入（`needs an api` / `needs a baseURL`）时才写入线上字段；0.1.5–
+0.1.7 留下的错误钉值，会在 `sources` 指明该路由实际订阅的 models.dev 提供方
+后被自动修复。
+
+> **从 0.1.5–0.1.7 升级：** 如果升级后某条路由开始报「余额/资源包」形状的 429，
+> 请到 *设置 → 模型 →（提供方）编辑 → 自定义设置* 检查它的 `baseURL`。这些版本
+> 会钉住同名 models.dev 提供方的端点；GLM Coding Plan 的密钥请在下方配置
+> `sources: { zai: zai-coding-plan }`（或把 Base URL 改为
+> `https://api.z.ai/api/coding/paas/v4`），下一次刷新即会修复。
+
 ## 入口
 
 - **自动检查**——启动时一次、此后每 `refreshHours` 一次，覆盖所有已接入提供方
@@ -45,6 +61,7 @@ dsh-models-dev:
   cachePath: ...          # 可选：目录缓存位置
   sources:                # 可选：路由 -> models.dev 提供方 id 映射
     my-gateway: opencode-go
+    zai: zai-coding-plan  # GLM Coding Plan 密钥：models.dev 的 `zai` 是开放平台
 ```
 
 作用范围：**llm-pi-ai 系列**（`settingsNs: llm-pi-ai`）——本插件写入的模型形状

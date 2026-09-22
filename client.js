@@ -100,7 +100,15 @@
         /** One human-readable summary of a sweep: counts per route, or the reason. */
         function summarize(results) {
           return (results || [])
-            .map((result) => (result.added === undefined ? `${result.route}: ${result.skipped || result.error}` : `${result.route}: +${result.added}/~${result.updated}`))
+            .map((result) => {
+              if (result.added === undefined) return `${result.route}: ${result.skipped || result.error}`;
+              const marks = [
+                ...(result.repaired ?? []).map((field) => `${field} repaired`),
+                ...(result.filled ?? []).map((field) => `${field} filled`),
+              ];
+              const tail = marks.length > 0 ? ` (${marks.join(', ')})` : '';
+              return `${result.route}: +${result.added}/~${result.updated}${tail}`;
+            })
             .join(', ');
         }
 

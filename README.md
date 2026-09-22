@@ -20,6 +20,25 @@ alone. It registers **no routes of its own**: no duplicated providers.
    seam's path ops and revision fencing — the same write the Models page's
    capability editor performs.
 
+The route's `api`/`baseURL` (its wire endpoint) are handled far more
+conservatively than the model rows, because they decide which endpoint — and
+which bill — a call lands on. An absent field is left absent: llm-pi-ai's
+installed catalog usually resolves it already, and pinning a models.dev endpoint
+over that resolution is how a working route gets re-pointed at the wrong flavor
+(models.dev's `zai` is the Z.AI **open platform**, while pi-ai's `zai` route is
+the Z.AI **Coding Plan** — pinning the open-platform endpoint turns every call
+into `429 Insufficient balance or no resource package`). The wire values are
+written only when llm-pi-ai's strict validation refuses the write without them
+(`needs an api` / `needs a baseURL`), and a pin left by 0.1.5–0.1.7 is repaired
+once `sources` names the models.dev provider your route actually subscribes to.
+
+> **Upgrading from 0.1.5–0.1.7:** if a route stopped working with a
+> billing-shaped 429 after those releases, check its `baseURL` in *Settings →
+> Models → (provider) Edit → Customized settings*. Those versions pinned the
+> same-named models.dev endpoint; for a GLM Coding Plan key, add
+> `sources: { zai: zai-coding-plan }` below (or set the Base URL to
+> `https://api.z.ai/api/coding/paas/v4`) and the next refresh repairs it.
+
 ## Surfaces
 
 - **Automatic check** — one sweep at startup and every `refreshHours` for
@@ -50,6 +69,7 @@ dsh-models-dev:
   cachePath: ...          # optional catalog cache override
   sources:                # optional route -> models.dev provider id overrides
     my-gateway: opencode-go
+    zai: zai-coding-plan  # GLM Coding Plan keys: models.dev's `zai` is the open platform
 ```
 
 Scope: the **llm-pi-ai family** rows (`settingsNs: llm-pi-ai`) — the model shape
