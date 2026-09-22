@@ -4,6 +4,14 @@
   "description": "Live models.dev catalog for DeepSeek Harness LLM providers: fetches provider/model metadata from models.dev and registers it through the dsh LLM seam — no stale vendored catalog. / Żywy katalog models.dev dla providerów LLM w DeepSeek Harness.",
   "type": "module",
   "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/M4cd1r/dsh-models-dev.git"
+  },
+  "bugs": {
+    "url": "https://github.com/M4cd1r/dsh-models-dev/issues"
+  },
+  "homepage": "https://github.com/M4cd1r/dsh-models-dev#readme",
   "exports": {
     ".": "./index.js",
     "./package.json": "./package.json"
