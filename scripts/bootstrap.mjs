@@ -7,6 +7,7 @@
 //
 // Usage: node scripts/bootstrap.mjs [path/to/index.js]
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -107,12 +108,17 @@ let manual = 'endpoint missing';
 let manualOk = false;
 if (route !== undefined) {
   const body = Buffer.from(JSON.stringify({ route: 'zai' }));
-  const req = {
-    method: 'POST',
-    url: REFRESH_PATH,
-    socket: { remoteAddress: '127.0.0.1' },
-    async *[Symbol.asyncIterator]() { yield body; },
-  };
+  // Event-based request double: the endpoint reads bodies with data/end/error
+  // listeners (a stream async iterator hangs — and then crashes the host on
+  // abort — when the request arrives through the LAN replay Proxy).
+  const req = new EventEmitter();
+  req.method = 'POST';
+  req.url = REFRESH_PATH;
+  req.socket = { remoteAddress: '127.0.0.1' };
+  setImmediate(() => {
+    req.emit('data', body);
+    req.emit('end');
+  });
   const captured = { status: undefined, body: undefined };
   const res = {
     setHeader() {},

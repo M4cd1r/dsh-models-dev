@@ -7,6 +7,7 @@
 // register routes of its own — the point is to keep the existing providers
 // current, not to duplicate them.
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,18 +38,34 @@ const PROVIDER_ROWS = [
   { provider: 'deepseek', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: ['providers', 'deepseek'] },
 ];
 
-/** A minimal HTTP request body reader the endpoint accepts. */
-function fakeRequest(payload) {
+/**
+ * A minimal HTTP request double the endpoint accepts.
+ *
+ * Event-based on purpose: the endpoint reads bodies with data/end/error
+ * listeners, not with the stream async iterator — the iterator hangs (and then
+ * crashes the host on abort) when the request arrives through the LAN replay
+ * Proxy. See test/lan-proxy.test.mjs for the live-server version of that.
+ * @param payload - parsed body to deliver, JSON-encoded.
+ * @param options.fail - emit a request-stream error instead of a body.
+ */
+function fakeRequest(payload, { fail } = {}) {
   const body = Buffer.from(JSON.stringify(payload ?? {}));
-  return {
-    method: 'POST',
-    url: REFRESH_PATH,
-    headers: {},
-    socket: { remoteAddress: '127.0.0.1' },
-    async *[Symbol.asyncIterator]() {
-      yield body;
-    },
-  };
+  const req = new EventEmitter();
+  req.method = 'POST';
+  req.url = REFRESH_PATH;
+  req.headers = {};
+  req.socket = { remoteAddress: '127.0.0.1' };
+  // Listeners are attached synchronously by the handler; deliver on the next
+  // tick, exactly like node:http delivering a body after the headers.
+  setImmediate(() => {
+    if (fail !== undefined) {
+      req.emit('error', new Error(fail));
+      return;
+    }
+    if (body.length > 0) req.emit('data', body);
+    req.emit('end');
+  });
+  return req;
 }
 
 /** A minimal response sink capturing the status code and JSON body. */
@@ -256,6 +273,26 @@ test('a failed sweep answers the endpoint with the error, its stack and the log'
     Array.isArray(res.captured.body.log) && res.captured.body.log.some((line) => line.includes('refresh: loading catalog')),
     `the attempt log rides along: ${JSON.stringify(res.captured.body.log)}`,
   );
+});
+
+test('a request whose stream errors answers 400 instead of hanging the host', async () => {
+  // What a browser abort looks like server-side. The old body reader (stream
+  // async iterator) hung here through the LAN replay Proxy and then killed the
+  // process; the endpoint must simply answer with the failure.
+  const h = harness({ autoSync: false });
+  const { apply } = await loadPlugin();
+  apply(h.ctx, {});
+  await waitForBootstrap(h.home);
+
+  const route = h.routes.find((candidate) => candidate.path === REFRESH_PATH);
+  assert.ok(route, 'the refresh endpoint is registered');
+
+  const res = fakeResponse();
+  await route.handler(fakeRequest({ route: 'zai' }, { fail: 'aborted' }), res);
+
+  assert.equal(res.captured.status, 400);
+  assert.equal(res.captured.body.ok, false);
+  assert.match(res.captured.body.error, /aborted/, 'the request failure is reported');
 });
 
 test('apply seats the refresh endpoint even when the webserver appears late', async () => {

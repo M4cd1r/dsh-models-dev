@@ -1,6 +1,6 @@
 {
   "name": "dsh-models-dev",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Keep DSH provider model catalogs current with the living models.dev catalog: refreshes each provider's models (new and existing) with updated modalities and thinking levels — automatically and from one refresh button in the Models page. / Utrzymuj żywy katalog models.dev dla providerów LLM w DeepSeek Harness.",
   "type": "module",
   "main": "index.js",
@@ -27,7 +27,7 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "check": "node --check index.js && node --check client.js && node --check lib/caps.mjs && node --check lib/service.mjs && node --check lib/sync.mjs && node --check scripts/bootstrap.mjs && node --check scripts/smoke.mjs && node --check test/bootstrap.test.mjs && node --check test/caps.test.mjs && node --check test/client.test.mjs && node --check test/service.test.mjs",
+    "check": "node --check index.js && node --check client.js && node --check lib/caps.mjs && node --check lib/service.mjs && node --check lib/sync.mjs && node --check scripts/bootstrap.mjs && node --check scripts/smoke.mjs && node --check test/bootstrap.test.mjs && node --check test/caps.test.mjs && node --check test/client.test.mjs && node --check test/service.test.mjs && node --check test/lan-proxy.test.mjs && node --check test/fixtures/lan-proxy-host.mjs",
     "test": "node --test test/*.test.mjs",
     "smoke": "node scripts/smoke.mjs",
     "bootstrap": "node scripts/bootstrap.mjs",

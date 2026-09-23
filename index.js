@@ -76,17 +76,61 @@ function writeJson(res, status, value) {
   }
 }
 
-/** Read one small JSON request body (empty bodies read as {}). */
-async function readJsonBody(req) {
-  let size = 0;
-  const chunks = [];
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > MAX_BODY_BYTES) throw new Error('request body too large');
-    chunks.push(chunk);
-  }
-  const raw = Buffer.concat(chunks).toString('utf8').trim();
-  return raw.length === 0 ? {} : JSON.parse(raw);
+/**
+ * Read one small JSON request body (empty bodies read as {}).
+ *
+ * Deliberately event-based instead of `for await (const chunk of req)`: the
+ * async iterator a Node stream hands out checks `this === stream` inside its own
+ * 'readable' listener, and the LAN replay layer (dsh-lan-replay) passes handlers
+ * a Proxy over the request. The 'readable' event is emitted by the raw
+ * IncomingMessage, so the listener runs with `this` = the raw stream, the
+ * comparison fails, and the iterator stores the (undefined) event argument where
+ * it keeps its pending promise. Two consequences, both observed live:
+ *
+ *   - the body read never settles — the refresh endpoint hung forever for every
+ *     trusted-LAN request, so the button did nothing;
+ *   - the first request-stream error after that (a browser abort — e.g. the page
+ *     reloading while the request is pending) runs the iterator's end-of-stream
+ *     callback, which calls the clobbered `callback()` and throws
+ *     "TypeError: callback is not a function" from inside an event handler: an
+ *     uncaught exception that kills the whole dsh host (exit 1, watchdog
+ *     restart, LAN down until it comes back).
+ *
+ * Explicit listeners carry no identity requirement and behave identically
+ * through a Proxy — same body, same errors, no host crash.
+ */
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    let settled = false;
+    const chunks = [];
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      const raw = Buffer.concat(chunks).toString('utf8').trim();
+      try {
+        resolve(raw.length === 0 ? {} : JSON.parse(raw));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        fail(new Error('request body too large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', finish);
+    req.on('error', fail);
+    req.on('aborted', () => fail(new Error('request aborted')));
+  });
 }
 
 /** The shared fence: loopback only (a trusted LAN request is replayed as one). */
