@@ -8,6 +8,43 @@ appear. This plugin refreshes the `models` array of the providers you already us
 — new models appended, existing models updated in place, hand-added models left
 alone. It registers **no routes of its own**: no duplicated providers.
 
+## Install
+
+Requirements: Node.js >= 22.19 and `pnpm` on `PATH` (the CLI forwards package
+operations to pnpm in the profile directory). Recommended install into the
+Web profile:
+
+```sh
+dsh plugin --profile web add dsh-models-dev
+```
+
+`--profile web` is required — `dsh plugin add ...` is not the supported
+complete form. The DSH Plugin Manager behind the command reads this package's
+`dsh.bundle.patch: ./cordis.patch.yml`, adds `dsh-models-dev` to the profile's
+`dsh.profile.bundles` (`~/.dsh/profiles/web/package.json`), and composes the
+patch into the profile tree. There is nothing to copy and no `--patch` to
+pass: a plain `pnpm add dsh-models-dev` only installs files — an unselected
+dependency is not mounted, so installation alone does not prove bundle
+selection.
+
+Start Web with `dsh web` once the install has finished. If Web is already
+running, the newly added bundle is applied through live reload when the
+profile has HMR enabled; without HMR, restart. Replacing the version of an
+already-loaded package always requires a process restart.
+
+Optional install from source:
+
+```sh
+dsh plugin --profile web add github:M4cd1r/dsh-models-dev
+```
+
+The sidebar's **Plugins** page in Web is the UI alternative: it installs the
+same npm package or GitHub spec into the currently managed profile.
+
+The manifest's `dsh.engines.dsh` records the minimum DSH version as package
+metadata; the compatibility gate of the current CLI checks declared peer
+dependency ranges instead of this field.
+
 ## How it works
 
 1. Fetch `https://models.dev/api.json` (24h TTL cache in
