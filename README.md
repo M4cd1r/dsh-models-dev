@@ -60,8 +60,13 @@ LAN request is replayed as loopback by dsh-lan).
 
 ## Settings
 
+Requires DSH >= 0.1.7. The plugin's configuration is no longer a
+`~/.dsh/settings.yaml` section: 0.1.7 renders the form from the plugin's own
+config schema (*Settings → plugins → dsh-models-dev*) and keeps the values in
+the active profile patch (`profiles/<name>/cordis.patch.yml`). Same keys as the
+entry's `config:` block:
+
 ```yaml
-# ~/.dsh/settings.yaml
 dsh-models-dev:
   refreshHours: 24        # automatic sweep period (h)
   autoSync: true          # the automatic check at startup and on the timer
@@ -71,6 +76,9 @@ dsh-models-dev:
     my-gateway: opencode-go
     zai: zai-coding-plan  # GLM Coding Plan keys: models.dev's `zai` is the open platform
 ```
+
+An edit applies live (the fields are volatile): the next sweep runs against the
+new values without restarting the plugin.
 
 Scope: the **llm-pi-ai family** rows (`settingsNs: llm-pi-ai`) — the model shape
 this plugin writes (`input`, `reasoningEfforts`) is that family's schema. Other

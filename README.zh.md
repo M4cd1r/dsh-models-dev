@@ -52,8 +52,12 @@ POST /api/dsh-models-dev/refresh   body: { "route": "opencode-go" }   # 或 {} �
 
 ## 设置
 
+需要 DSH >= 0.1.7。本插件的配置不再是 `~/.dsh/settings.yaml` 里的一个小节：
+0.1.7 会根据插件自身的配置 schema 渲染表单（*设置 → 插件 → dsh-models-dev*），
+并把取值保存在当前 profile 补丁（`profiles/<name>/cordis.patch.yml`）。键与条目
+`config:` 块相同：
+
 ```yaml
-# ~/.dsh/settings.yaml
 dsh-models-dev:
   refreshHours: 24        # 自动刷新周期（小时）
   autoSync: true          # 启动时与定时的自动检查
@@ -63,6 +67,8 @@ dsh-models-dev:
     my-gateway: opencode-go
     zai: zai-coding-plan  # GLM Coding Plan 密钥：models.dev 的 `zai` 是开放平台
 ```
+
+配置修改即时生效（字段为 volatile）：下一次刷新直接使用新取值，无需重启插件。
 
 作用范围：**llm-pi-ai 系列**（`settingsNs: llm-pi-ai`）——本插件写入的模型形状
 （`input`、`reasoningEfforts`）即该系列的 schema。其他适配器（如 DeepSeek）声明的

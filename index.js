@@ -36,17 +36,35 @@ const MIN_REFRESH_HOURS = 0.05;
 const REFRESH_PATH = '/api/dsh-models-dev/refresh';
 const MAX_BODY_BYTES = 64 * 1024;
 
-/** Plugin configuration: where the living catalog lives and when to sweep. */
+/**
+ * Plugin configuration: where the living catalog lives and when to sweep.
+ *
+ * Every field is volatile: the 0.1.7 host derives the plugin's settings form
+ * from this schema and drops any entry whose schema has no volatile field, and
+ * volatility is what lets an edit apply without remounting the entry.
+ */
 export const Config = z.object({
-  modelsDevUrl: z.string().default(DEFAULT_URL),
-  refreshHours: z.number().min(MIN_REFRESH_HOURS).default(24),
-  cachePath: z.string().required(false),
-  autoSync: z.boolean().default(true),
-  sources: z.dict(z.string()).default({}),
+  modelsDevUrl: z.string().default(DEFAULT_URL).volatile(),
+  refreshHours: z.number().min(MIN_REFRESH_HOURS).default(24).volatile(),
+  cachePath: z.string().required(false).volatile(),
+  autoSync: z.boolean().default(true).volatile(),
+  sources: z.dict(z.string()).default({}).volatile(),
 });
 
 function dshHome() {
   return process.env.DSH_HOME ?? join(homedir(), '.dsh');
+}
+
+/**
+ * One config field's live value: a volatile field arrives as a reference.
+ */
+function readField(field, fallback) {
+  if (field === undefined || field === null) return fallback;
+  if (typeof field === 'object' && typeof field.get === 'function') {
+    const value = field.get();
+    return value === undefined ? fallback : value;
+  }
+  return field;
 }
 
 /**
@@ -140,11 +158,19 @@ function isLoopback(req) {
 }
 
 export function apply(ctx, config) {
-  let current = () => config;
-  trace(`apply: called (loader autoSync=${config?.autoSync}, sources=${Object.keys(config?.sources ?? {}).join(',') || 'none'})`);
+  /** The live config: volatile fields arrive as references the loader updates in place. */
+  const current = () => ({
+    modelsDevUrl: readField(config?.modelsDevUrl, DEFAULT_URL),
+    refreshHours: readField(config?.refreshHours, 24),
+    cachePath: readField(config?.cachePath, undefined),
+    autoSync: readField(config?.autoSync, true),
+    sources: readField(config?.sources, {}),
+  });
+  trace(`apply: called (loader autoSync=${readField(config?.autoSync)}, sources=${Object.keys(readField(config?.sources, {}) ?? {}).join(',') || 'none'})`);
 
   /** The pieces the sweep and the endpoint need; filled by the bootstrap. */
   const state = { sync: undefined, settings: undefined };
+  let timer;
 
   /**
    * One sweep: one catalog read, then every hooked-up pi-ai route (or only the
@@ -173,27 +199,34 @@ export function apply(ctx, config) {
     return results;
   };
 
-  /** A settings change swaps the live source first; the models follow. */
-  const onSettingsChange = () => {
-    void runSync().catch((error) => ctx.logger?.error?.(`${NS}: keeping the previously refreshed models after a refused update`, error));
+  /**
+   * The 0.1.7 settings service owns the plugin's form (derived from the volatile
+   * Config schema), so the seam only needs attaching — there is no section to
+   * install, and nothing here can leave `state.settings` undefined.
+   */
+  const attachSettings = (settings) => {
+    state.settings = settings;
+    trace('bootstrap: settings seam attached');
   };
 
-  /** The settings section owns the live config values (see the sync's source swap). */
-  const installSettings = (settings) => {
-    try {
-      settings.installSection(ctx, NS, Config, config, {
-        validate: () => {},
-        setSource: (source) => {
-          current = source;
-        },
-        onChange: onSettingsChange,
-      });
-      state.settings = settings;
-      trace('bootstrap: settings section installed');
-    } catch (error) {
-      trace(`bootstrap: installSection FAILED — ${error?.stack ?? error}`);
-      throw error;
-    }
+  /** The TTL-cached catalog reader; rebuilt when the live url or cache path changes. */
+  const buildSync = () => {
+    const cfg = current();
+    return new ModelsDevSync({
+      url: cfg.modelsDevUrl ?? DEFAULT_URL,
+      cachePath: cfg.cachePath ?? join(dshHome(), 'plugins', NS, 'models.dev.json'),
+      ttlMs: Math.max(MIN_REFRESH_HOURS, cfg.refreshHours ?? 24) * 60 * 60 * 1000,
+      logger: ctx.logger,
+    });
+  };
+
+  /** The periodic sweep; restarted when the live refresh hours change. */
+  const restartTimer = () => {
+    if (timer !== undefined) clearInterval(timer);
+    timer = setInterval(() => {
+      void runSync({ force: true }).catch((error) => ctx.logger?.error?.(`${NS}: catalog refresh failed`, error));
+    }, Math.max(MIN_REFRESH_HOURS, current().refreshHours ?? 24) * 60 * 60 * 1000);
+    timer.unref?.();
   };
 
   /** POST {route?}: the refresh button's endpoint; no body sweeps everything. */
@@ -227,17 +260,10 @@ export function apply(ctx, config) {
       // fiber did not declare in `inject` throws "cannot get property ... without
       // inject", so the optional seats are read with the lenient get(name, false).
       const settings = ctx.get('settings', false);
-      if (settings !== undefined) installSettings(settings);
-      else trace('bootstrap: settings service not up yet — installing when it appears');
+      if (settings !== undefined) attachSettings(settings);
+      else trace('bootstrap: settings service not up yet — attaching when it appears');
 
-      const cfg = current();
-      const sync = new ModelsDevSync({
-        url: cfg.modelsDevUrl ?? DEFAULT_URL,
-        cachePath: cfg.cachePath ?? join(dshHome(), 'plugins', NS, 'models.dev.json'),
-        ttlMs: Math.max(MIN_REFRESH_HOURS, cfg.refreshHours ?? 24) * 60 * 60 * 1000,
-        logger: ctx.logger,
-      });
-      state.sync = sync;
+      state.sync = buildSync();
       trace('bootstrap: catalog sync ready');
 
       // The refresh endpoint: what the "update models from models.dev API" button
@@ -257,18 +283,22 @@ export function apply(ctx, config) {
 
       // The automatic check for everything hooked up: once here (the catalog
       // cache decides whether models.dev needs a fetch), then every refresh.
-      if (cfg.autoSync !== false) await runSync();
+      if (current().autoSync !== false) await runSync();
 
-      const timer = setInterval(() => {
-        void runSync({ force: true }).catch((error) => ctx.logger?.error?.(`${NS}: catalog refresh failed`, error));
-      }, Math.max(MIN_REFRESH_HOURS, current().refreshHours ?? 24) * 60 * 60 * 1000);
-      timer.unref?.();
+      restartTimer();
       ctx.on?.('dispose', () => clearInterval(timer));
+      // A volatile config edit: the live values moved under the same entry, so
+      // the sync, the timer and the models all follow without a remount.
+      ctx.on?.('loader/volatile-update', () => {
+        state.sync = buildSync();
+        restartTimer();
+        void runSync().catch((error) => ctx.logger?.error?.(`${NS}: keeping the previously refreshed models after a refused update`, error));
+      });
 
       if (settings === undefined) {
         ctx.inject(['settings'], (settingsCtx) => {
-          installSettings(settingsCtx.settings);
-          onSettingsChange();
+          attachSettings(settingsCtx.settings);
+          void runSync().catch((error) => ctx.logger?.error?.(`${NS}: keeping the previously refreshed models after a refused update`, error));
         });
       }
       trace('bootstrap: done');

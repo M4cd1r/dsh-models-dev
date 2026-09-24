@@ -15,7 +15,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply } from '../../index.js';
 
-const NS = 'dsh-models-dev';
 const REFRESH_PATH = '/api/dsh-models-dev/refresh';
 const TRUSTED_HOSTS = ['192.168.1.72:3080'];
 
@@ -61,10 +60,9 @@ function asLoopback(request, port) {
 const routes = new Map();
 const errors = [];
 
+// The 0.1.7 settings service: describe and mutate only — there is no section
+// to install, and the live config values travel through apply()'s config.
 const settings = {
-  installSection(_owner, ns, _schema, _entry, hooks) {
-    hooks.setSource(() => resolved);
-  },
   describe: () => [],
   mutate: async () => {},
 };
@@ -139,7 +137,7 @@ resolved.modelsDevUrl = `http://127.0.0.1:${webServer.port}/catalog.json`;
 // artefacts in the working tree.
 resolved.cachePath = join(mkdtempSync(join(tmpdir(), 'dsh-models-dev-lan-proxy-')), 'models.dev.json');
 
-apply(ctx, { autoSync: false });
+apply(ctx, resolved);
 
 const deadline = Date.now() + 10_000;
 while (Date.now() < deadline && !routes.has(REFRESH_PATH)) {

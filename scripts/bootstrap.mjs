@@ -1,9 +1,10 @@
 // scripts/bootstrap.mjs — prove the plugin bootstraps inside the running dsh.
 //
-// Mirrors the host composition: the settings section swaps the live config in,
-// the llm directory lists what is hooked up, the webserver seat carries the
-// refresh endpoint, and the llm seam refuses any route registration (the
-// refresh owns none — duplicating providers is what this plugin replaced).
+// Mirrors the host composition: the volatile config carries the live values in
+// (the 0.1.7 settings seam has no section to install), the llm directory lists
+// what is hooked up, the webserver seat carries the refresh endpoint, and the
+// llm seam refuses any route registration (the refresh owns none — duplicating
+// providers is what this plugin replaced).
 //
 // Usage: node scripts/bootstrap.mjs [path/to/index.js]
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -43,17 +44,11 @@ writeFileSync(cachePath, JSON.stringify({ fetchedAt: new Date().toISOString(), d
 
 const RESOLVED = { modelsDevUrl: 'http://127.0.0.1:9/unreachable', refreshHours: 24, cachePath, autoSync: true, sources: {} };
 
-const sections = [];
 const writes = [];
 const routes = [];
 const errors = [];
 
 const settings = {
-  installSection(_owner, ns, _schema, _entry, hooks) {
-    sections.push(ns);
-    hooks.setSource(() => RESOLVED);
-    hooks.onChange();
-  },
   // Both pi-ai rows carry a profile (hooked up); the deepseek row lives in
   // another namespace and must never be written.
   describe: () => [{ ns: 'llm-pi-ai', value: { providers: { 'opencode-go': {}, zai: {} } }, user: {}, revision: 4 }],
@@ -92,7 +87,7 @@ const ctx = {
 };
 
 const { apply } = await import(pathToFileURL(pluginIndex).href);
-apply(ctx, {});
+apply(ctx, RESOLVED);
 
 const tracePath = join(home, 'plugins', NS, 'bootstrap.log');
 const deadline = Date.now() + 20000;
@@ -132,7 +127,9 @@ if (route !== undefined) {
 
 const swept = writes.map((write) => write.ops[0].path[1]);
 const problems = [];
-if (!sections.includes(NS)) problems.push(`no settings section for "${NS}"`);
+// The seam is asserted by the writes, not by a section registration: the 0.1.7
+// host owns the form, so the sweep landing is what proves the seam attached.
+if (!/settings seam attached/.test(trace)) problems.push('the settings seam never attached');
 if (!swept.includes('opencode-go') || !swept.includes('zai')) problems.push(`the automatic sweep wrote: ${swept.join(', ') || 'none'}`);
 if (swept.includes('deepseek')) problems.push('the deepseek row (other namespace) must not be touched');
 if (route === undefined) problems.push(`no refresh endpoint on ${REFRESH_PATH}`);
@@ -147,4 +144,4 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log(`bootstrap: OK — section "${NS}", swept ${swept.join(',')}, ${manual}`);
+console.log(`bootstrap: OK — seam attached, swept ${swept.join(',')}, ${manual}`);

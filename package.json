@@ -1,6 +1,6 @@
 {
   "name": "dsh-models-dev",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Keep DSH provider model catalogs current with the living models.dev catalog: refreshes each provider's models (new and existing) with updated modalities and thinking levels — automatically and from one refresh button in the Models page. / Utrzymuj żywy katalog models.dev dla providerów LLM w DeepSeek Harness.",
   "type": "module",
   "main": "index.js",
@@ -48,11 +48,11 @@
     "model-list"
   ],
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.2"
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "dsh": {
     "engines": {
-      "dsh": ">=0.1.5-rc.1"
+      "dsh": ">=0.1.7"
     },
     "bundle": {
       "patch": "./cordis.patch.yml"
