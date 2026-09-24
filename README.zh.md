@@ -7,6 +7,38 @@ DeepSeek Harness 里已配置的提供方，其模型行的模态（图片输入
 数组——补入新模型、就地更新已有模型的能力，用户手加的模型行保持不动。它
 **不注册任何路由**：不产生重复的提供方。
 
+## 安装
+
+要求：Node.js >= 22.19，且 `pnpm` 在 `PATH` 上（`dsh plugin` 的包操作会转发到
+profile 目录中的 pnpm）。推荐安装到 Web profile：
+
+```sh
+dsh plugin --profile web add dsh-models-dev
+```
+
+`--profile web` 必填——`dsh plugin add ...` 不是受支持的完整形式。命令背后的
+DSH 插件管理器会读取本包的 `dsh.bundle.patch: ./cordis.patch.yml`，把
+`dsh-models-dev` 加入 profile 的 `dsh.profile.bundles`
+（`~/.dsh/profiles/web/package.json`），并把补丁组合进 profile 树。不需要复制
+补丁，也不需要传 `--patch`：单跑 `pnpm add dsh-models-dev` 只会安装文件——未被
+选中的依赖不会挂载，安装本身并不等于 bundle 选中。
+
+安装完成后用 `dsh web` 启动。如果 Web 已在运行，新加的 bundle 在启用 HMR 的
+profile 里通过实时重载生效；未启用 HMR 则需重启。替换已加载包的版本始终需要
+重启进程。
+
+可选的源码安装：
+
+```sh
+dsh plugin --profile web add github:M4cd1r/dsh-models-dev
+```
+
+Web 侧边栏的 **Plugins**（插件）页面是等价的 UI 入口：可把同样的 npm 包名或
+GitHub 规格安装进当前管理的 profile。
+
+包清单中的 `dsh.engines.dsh` 只是记录最低 DSH 版本的包元数据；当前 CLI 的兼容
+性门槛检查的是声明的 peer dependency 范围，而非该字段。
+
 ## 工作方式
 
 1. 抓取 `https://models.dev/api.json`（24 小时 TTL 缓存于
